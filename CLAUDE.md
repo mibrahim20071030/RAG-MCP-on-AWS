@@ -107,7 +107,7 @@ Format: `Layer N, date: what differs from the reference design, and why.`
   - NEW `tests/test_retrieve.py` (17 tests, fakes only). Checks: 1,149 passed, 212 skipped; ruff clean.
   - Review (built-in `/code-review` and `pr-test-analyzer`): `retrieve` added to `RAG_MODULES` in `scripts/build_lambda.py` (the Project 2 Lambda build would have stopped); `k` below 1 raises `ValueError`; the docstring says `reranked` is the setting, not proof a rerank call was made; a test that `answer_question` hands its clients on. Not changed: `rag/kb.py` keeps its own `_ms_since` (no layer asks to change `kb.py`).
   - The optional free check on the local database was skipped (Docker Desktop not running).
-- Layer 2, 2026-11-21 (built, tested, reviewed; waiting for Ibrahim's commit, PR and merge):
+- Layer 2, 2026-11-21 (done; PR #27 merged, `d60a6d9`, CI green):
   - Review fixes: `DATASHEETS` built from `config.DOCUMENTS` with an import-time check against `DatasheetName`; description says `relevance` is 0..1 only when reranked; `pydantic==2.14.4` pinned. Open: `rag/rerank.py` pacing has no lock (overlapping calls; Layer 6 slot covers Lambda).
   - `mcp==2.3.0` (still newest on PyPI 2026-11-21; pure-Python wheel) in `requirements.txt` and the CI install line.
   - NEW `datasheet_mcp/tools.py` (`DATASHEETS`, `Passage`, `SearchResult`, `Deps`, `shape`, `run_search`, `SEARCH_DESCRIPTION`) and `datasheet_mcp/server.py` (`build_server`, `real_deps`, `main`; stdio). Run from `datasheet-rag/`: `.venv\Scripts\python.exe -m datasheet_mcp.server`.

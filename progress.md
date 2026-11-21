@@ -14,7 +14,7 @@ Project 3 (remote MCP server), Layer 0:
 - [x] 2026-11-21: Project 3 parallel split kept as proposed.
 - [x] 2026-11-21: Layer 2 plan approved; Docker started; Inspector UI test passed (10 LM35 passages).
 - [ ] Read `walkthroughs/Project3/Layer2_Walkthrough.pdf`.
-- [ ] Layer 2: make the branch (`git switch -c project3-layer2`), commit, push, PR, CI green, merge.
+- [x] 2026-11-21: Layer 2 committed on `project-3-layer-2`, PR #27 merged (`d60a6d9`), CI green on `main`.
 - [ ] Uninstall the `code-review` and `code-simplifier` plugins (`/plugin`), then restart Claude Code so the `superpowers` setting takes effect.
 - [ ] Before Layer 6: decide the open items in `CLAUDE.md`, "Open decisions for Ibrahim".
 
@@ -223,6 +223,7 @@ Cycle 2 (deploy, UI, report):
 - Review (built-in `/code-review` medium; no extra agents: Layer 2 adds no tests). Fixed: `DATASHEETS` is now built from `config.DOCUMENTS`, and the module stops at import if `DatasheetName` disagrees with it (out of step, the SDK would accept a name that ends in a `KeyError` and only the generic error); the tool description now says `relevance` is the reranker score only when `reranked` is true; `pydantic==2.14.4` pinned in `requirements.txt` (imported directly). Not changed, reported: rounding `relevance` to 4 places can make close search scores equal when the reranker is off (order is kept); rerank pacing in `rag/rerank.py` has no lock, so two overlapping tool calls could both call Cohere inside the pause (Project 2 code, pre-existing; Lambda replaces the pause with the DynamoDB slot in Layer 6). The `CLAUDE.md` finding was already done. Checks: 1,361 passed, 0 skipped (Docker on). Review recorded (1 of 2).
 - New rule from the human: walkthroughs are written as a PDF in `walkthroughs/` (not given in the chat), and each starts with a "Terms" section that defines every new term or tool in simple language. Added to `CLAUDE.md` (teach rule) and to Claude's memory.
 - Layer 2 walkthrough written: `walkthroughs/Project3/Layer2_Walkthrough.pdf`, 7 pages (Terms first: MCP, Inspector, stdio, JSON-RPC, schema, Pydantic, ToolError and more), made from HTML with headless Edge. `walkthroughs/` is gitignored.
+- Layer 2 done: the human merged PR #27 (`d60a6d9`); CI green on `main`. Next: Layer 3 (tool tests and `Deadline`, parallel build) when the human says so, in plan mode.
 
 ## 2026-11-21 — Session 32: Project 3 setup (Layer 0)
 
