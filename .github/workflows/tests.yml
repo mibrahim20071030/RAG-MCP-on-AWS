@@ -29,7 +29,7 @@ jobs:
       # Same packages as the local venv (see CLAUDE.md, Layer 0), plus the linter.
       # ruff is pinned to the local version so new default rules cannot fail a PR on their own.
       - name: Install dependencies
-        run: pip install pdfplumber "psycopg[binary]" boto3 numpy pytest ruff==0.17.0
+        run: pip install pdfplumber "psycopg[binary]" boto3 numpy pytest ruff==0.17.0 mcp==2.3.0
 
       # The two steps below mirror tools/checks.py: ruff from the repo root (so ruff.toml
       # applies and tools/ is linted too), pytest from datasheet-rag.

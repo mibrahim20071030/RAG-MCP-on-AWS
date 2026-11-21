@@ -12,6 +12,9 @@ Project 3 (remote MCP server), Layer 0:
 - [ ] Read `walkthroughs/Project3/Layer1_Walkthrough.pdf` when convenient.
 - [ ] Layer 1: make the branch (for example `git switch -c project3-layer1`; the uncommitted work moves with it), commit, push, PR, CI green, merge.
 - [x] 2026-11-21: Project 3 parallel split kept as proposed.
+- [x] 2026-11-21: Layer 2 plan approved; Docker started; Inspector UI test passed (10 LM35 passages).
+- [ ] Read `walkthroughs/Project3/Layer2_Walkthrough.pdf`.
+- [ ] Layer 2: make the branch (`git switch -c project3-layer2`), commit, push, PR, CI green, merge.
 - [ ] Uninstall the `code-review` and `code-simplifier` plugins (`/plugin`), then restart Claude Code so the `superpowers` setting takes effect.
 - [ ] Before Layer 6: decide the open items in `CLAUDE.md`, "Open decisions for Ibrahim".
 
@@ -204,6 +207,22 @@ Cycle 2 (deploy, UI, report):
   2026-11-10), `/api/ask` throttle rate 0.5, burst 10 (set by the human; the dev user cannot read API Gateway).
 - [ ] 10c. After the LinkedIn traffic: put both caps back to 50 and the `/api/ask` throttle back to rate 0.05, burst 3.
 - [ ] 11. Teardown checklist (including the Knowledge Base and feedback-loop resources), then confirm in Billing that spend has stopped. Wait until the LinkedIn traffic is over.
+
+## 2026-11-21 — Session 33: Project 3 Layer 2 (stdio MCP server)
+
+- Plan approved (single agent). Checked first: `mcp` 2.3.0 is still the newest on PyPI; its wheel is pure Python (`py3-none-any`), so Python 3.14 is not a problem for the SDK itself. Names read from the 2.3.0 source: `mcp.server.MCPServer`, `mcp.server.mcpserver.exceptions.ToolError`, `mcp.types.ToolAnnotations`; `run()` defaults to stdio; plain (non-async) tools run in a worker thread.
+- `mcp==2.3.0` installed in `datasheet-rag\.venv`, added to `requirements.txt` and the CI install line.
+- NEW `datasheet_mcp/__init__.py`, `tools.py` (`DATASHEETS`, `Passage`, `SearchResult`, `Deps`, `shape`, `run_search`, `SEARCH_DESCRIPTION`) and `server.py` (`build_server`, `real_deps`, `main`). `Deps` has no `budget_s` yet (the `Deadline` is Layer 3).
+- Problem (in my check script, not the code): `tool.inputSchema` raised `AttributeError`. Why: in `mcp` 2.x the Python objects use snake case (`input_schema`); the camel-case name is only the JSON spelling on the wire. Fix: used `input_schema`.
+- Checks: secrets ok, ruff ok, pytest 1,149 passed, 212 skipped (unchanged).
+- Inspector 2.13.0. Its CLI help shows that the mode flag (`--cli`, `--web`, `--tui`) must come first; stdio servers take `--cwd`. Free checks over stdio passed: `tools/list` shows `search_datasheets` with the enum, limits, defaults, output schema and annotations; a blank query gives our `ToolError` text with `isError: true`; `num_results=11` is rejected by the SDK (Pydantic text) before the function runs.
+- The human started Docker. Problem: the first LM35 search failed with `column d.source does not exist`. Why: the local database was made before Cycle 2 step 9a added `documents.source` (and `title`, `expires_at`), and step 9a ran only against Aurora. Fix: `scripts/show_db.py`, which runs the idempotent `db.create_schema` (`ADD COLUMN IF NOT EXISTS`, default `'curated'`); every row count still matches Layer 2. No code change.
+- Free check before the call: the q01 question's embedding and all 30 rerank scores for `document=lm35` were cached, so the call cost $0 (no new cost log rows).
+- Layer 2 test passed: Inspector CLI call returned passages; then the human ran the Inspector UI: tool listed, LM35 call returned 10 passages, `reranked: true`; page 4 is at rank 2 (recommended operating conditions) and rank 6 (absolute maximum ratings, 35 V, the q01 answer). `printed_page` is null on all of them (LM35's printed numbers equal its PDF pages).
+- `CLAUDE.md`: Layer 2 status, two Differences log lines (`Deps` without `budget_s`; the local schema update), the Inspector flags that worked, and the package note. Code review started.
+- Review (built-in `/code-review` medium; no extra agents: Layer 2 adds no tests). Fixed: `DATASHEETS` is now built from `config.DOCUMENTS`, and the module stops at import if `DatasheetName` disagrees with it (out of step, the SDK would accept a name that ends in a `KeyError` and only the generic error); the tool description now says `relevance` is the reranker score only when `reranked` is true; `pydantic==2.14.4` pinned in `requirements.txt` (imported directly). Not changed, reported: rounding `relevance` to 4 places can make close search scores equal when the reranker is off (order is kept); rerank pacing in `rag/rerank.py` has no lock, so two overlapping tool calls could both call Cohere inside the pause (Project 2 code, pre-existing; Lambda replaces the pause with the DynamoDB slot in Layer 6). The `CLAUDE.md` finding was already done. Checks: 1,361 passed, 0 skipped (Docker on). Review recorded (1 of 2).
+- New rule from the human: walkthroughs are written as a PDF in `walkthroughs/` (not given in the chat), and each starts with a "Terms" section that defines every new term or tool in simple language. Added to `CLAUDE.md` (teach rule) and to Claude's memory.
+- Layer 2 walkthrough written: `walkthroughs/Project3/Layer2_Walkthrough.pdf`, 7 pages (Terms first: MCP, Inspector, stdio, JSON-RPC, schema, Pydantic, ToolError and more), made from HTML with headless Edge. `walkthroughs/` is gitignored.
 
 ## 2026-11-21 — Session 32: Project 3 setup (Layer 0)
 

@@ -6,3 +6,6 @@ boto3==1.43.111
 numpy==2.5.4
 pytest==9.1.1
 ruff==0.17.0
+# Project 3 (MCP server). Pure-Python wheel; pulls in pydantic, starlette, uvicorn, pyjwt, opentelemetry-api.
+mcp==2.3.0
+pydantic==2.14.4  # imported directly by datasheet_mcp; the version mcp 2.3.0 resolved to
