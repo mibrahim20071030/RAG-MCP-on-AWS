@@ -79,6 +79,7 @@ Design documents: `docs/project3/` (blueprint, code tour, tooling; local only).
 - Gateway returns 404 for a method with no route (Layer 7).
 - The Request headers (static header) option on Ibrahim's account (Layer 8).
 - Inspector CLI flag names: run `--help` first and record what works here.
+- Whether Claude's requests to the server carry an `Origin` header (with `allowed_hosts` set, any Origin gets 403) (Layers 7 and 8: log the headers).
 
 ### Open decisions for Ibrahim
 
@@ -98,6 +99,11 @@ Format: `Layer N, date: what differs from the reference design, and why.`
 - Layer 3, 2026-11-21: the SDK's Pydantic text for bad inputs is kept, not shortened. Why: it names the field and the allowed values, and shortening it needs an override of SDK internals (Ibrahim chose this, 2026-11-21).
 - Layer 3, 2026-11-21: "log the detail" of unexpected exceptions needs no code: the SDK logs the traceback at ERROR (logger `mcp.server.mcpserver.server`) and sends only the generic text (read in the `mcp` 2.3.0 source, 2026-11-21). A `ToolError` arrives as `Error executing tool search_datasheets: <message>`.
 - Layer 3, 2026-11-21: `Deadline(total_s)` raises `ValueError` when `total_s <= 0` (proposal by Claude, in the approved plan).
+- Layer 4, 2026-11-21: `build_app(deps, allowed_hosts=None)` has no `verifier`, `public_url`, `issuer` or `scope` parameters (the code tour's signature); Layer 5 adds them (not building ahead).
+- Layer 4, 2026-11-21: `allowed_hosts=None` passes no security settings, so the SDK's own localhost rule applies (Host `127.0.0.1:*`, `localhost:*`, `[::1]:*`). The design always passes the API host; that happens in Layer 7. An empty list raises `ValueError`, so a blank setting cannot fall back to localhost-only and give 421 on every call (code review finding).
+- Layer 4, 2026-11-21: with `allowed_hosts` set, the SDK leaves `allowed_origins` empty, so a request with any `Origin` header gets 403 (mcp 2.3.0 `transport_security.py`, tested). Server-to-server clients send no Origin; whether Claude's requests carry one is in "Unverified items".
+- Layer 4, 2026-11-21: `GET /mcp` with no version header and `Accept: text/event-stream` still opens a stream that stays open; the app does not refuse it (the gateway's POST-only route does, Layer 7). The 405 test covers GET and DELETE with the 2026-07-28 header only.
+- Layer 4, 2026-11-21: an automated test file `tests/test_mcp_app.py` (17 tests, Starlette `TestClient`, fakes) was added on top of the by-hand tests (proposal by Claude; Ibrahim chose it, 2026-11-21).
 
 ### Status log
 
@@ -121,6 +127,13 @@ Format: `Layer N, date: what differs from the reference design, and why.`
   - NEW `datasheet_mcp/budget.py`: `Deadline(total_s, clock=time.monotonic)` with `remaining`, `cap`, `require`.
   - NEW `tests/test_mcp_tool.py` (in-memory `Client` from `mcp`, fakes; `pytestmark = pytest.mark.anyio` and an `anyio_backend` fixture returning `"asyncio"`) and `tests/test_budget.py` (fake clock). Checks: 1,423 passed; ruff clean.
   - Review (built-in `/code-review`, `silent-failure-hunter`, `pr-test-analyzer`): `total_s`, step limit and margin must be finite and not negative; docstrings say `require` before `cap`; tests that a crash is logged with its detail and a `ToolError` is not logged at ERROR. Open, for the layer that wires `Deadline` in: `cap` returns 0.0 when time is up, and libpq reads a `connect_timeout` of 0 as "wait forever" (and rounds values under 2 s up to 2 s; verify in the PostgreSQL docs then); decide whether `cap` raises instead. Open (Layer 2 code): `shape()` labels a document missing from `config.DOCUMENTS` with its raw name and a blank revision.
+- Layer 4, 2026-11-21 (all tests passed; waiting for Ibrahim's branch, commit, PR and merge):
+  - `claude mcp add --transport http datasheets-local http://127.0.0.1:8000/mcp` (Ibrahim): `claude mcp list` showed Connected; a Claude Code session called `search_datasheets` for the q01 LM35 question and answered with the right value and page citation; then removed.
+  - NEW `datasheet_mcp/app.py`: `build_app(deps, allowed_hosts=None)` (`streamable_http_app(stateless_http=True, json_response=True)`; a new app per call because an app starts once only) and `main()` (uvicorn, 127.0.0.1:8000). Run from `datasheet-rag/`: `.venv\Scripts\python.exe -m datasheet_mcp.app`.
+  - NEW `tests/test_mcp_app.py` (17 tests). Checks: 1,440 passed; ruff clean. No new package (`uvicorn`, `starlette` come with `mcp`; `httpx` is not needed for `TestClient` here).
+  - curl against the local database ($0, q01 fully cached): new style 200; missing `_meta` 400 `-32602`; `Mcp-Name` mismatch 400 `-32020`; `initialize` 200 with no `Mcp-Session-Id`, notification 202, call 200; GET/DELETE with the version header 405; wrong Host 421. In PowerShell, use `curl.exe` and body files, or run curl in Bash.
+  - Inspector 2.13 over HTTP (flags that worked): `npx @modelcontextprotocol/inspector --cli http://127.0.0.1:8000/mcp --transport http --method tools/list` (or `--method tools/call --tool-name search_datasheets --tool-arg query=... --tool-arg datasheet=LM35 --tool-arg num_results=3`); both exit 0.
+  - Review (built-in `/code-review`, `pr-test-analyzer`): fixes listed in the Differences log and `progress.md`; `uvicorn` is imported inside `main()` so the Layer 7 Lambda does not load it.
 
 ## Environment notes (both projects)
 
