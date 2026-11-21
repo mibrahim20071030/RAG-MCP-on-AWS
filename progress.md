@@ -21,7 +21,7 @@ Project 3 (remote MCP server), Layer 0:
 - [x] 2026-11-21: Layer 4 plan approved (single agent; pytest file added on top of the by-hand tests).
 - [x] 2026-11-21: Layer 4 `claude mcp add` check passed (Connected; right answer with page citation; removed after).
 - [ ] Read `walkthroughs/Project3/Layer4_Walkthrough.pdf`.
-- [ ] Layer 4: make the branch (the new files are untracked on `main` and move with it), commit, push, PR, CI green, merge.
+- [x] 2026-11-21: Layer 4 committed on `project-3-layer-4`, PR #29 merged (`09467e0`), CI green on `main`.
 - [ ] Uninstall the `code-review` and `code-simplifier` plugins (`/plugin`), then restart Claude Code so the `superpowers` setting takes effect.
 - [ ] Before Layer 6: decide the open items in `CLAUDE.md`, "Open decisions for Ibrahim".
 
@@ -226,7 +226,7 @@ Cycle 2 (deploy, UI, report):
 - Review: `pr-test-analyzer` (no critical gaps; added Origin 403, `Mcp-Method` and version mismatch 400, unexpected error gives only the generic text over HTTP) and built-in `/code-review` (6 nits; fixed: an empty `allowed_hosts` raises `ValueError`; `uvicorn` imported inside `main()` so the Lambda does not load it; docstring gives the source and date and says a GET with no version header stays open and is blocked at the gateway; the rest recorded in `CLAUDE.md`). Checks: secrets ok, ruff ok, 1,440 passed. Review recorded (1 of 2).
 - Layer 4 walkthrough written: `walkthroughs/Project3/Layer4_Walkthrough.pdf` (Terms first), made from HTML with headless Edge.
 - The human ran `claude mcp add` against the local server: `claude mcp list` showed Connected, Claude Code called `search_datasheets` and answered the LM35 question with the right value and page citation; then `claude mcp remove`. All Layer 4 tests passed. Local server stopped.
-- Open: the human's branch, commit, PR and merge. Next: Layer 5 (login) when the human says so, in plan mode.
+- Layer 4 done: the human merged PR #29 (`09467e0`); CI green on `main`. Next: Layer 5 (login, parallel: `auth.py` builder and test writer) when the human says so, in plan mode.
 
 ## 2026-11-21 — Session 34: Project 3 Layer 3 (tool tests and `Deadline`)
 
