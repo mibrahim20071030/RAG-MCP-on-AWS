@@ -8,6 +8,8 @@ Project 3 (remote MCP server), Layer 0:
 
 - [x] 2026-11-21: AWS billing alert confirmed (zero spend budget, Healthy).
 - [x] 2026-11-21: Layer 0 committed on `project-3`, CI green, PR #25 merged (`97530e8`).
+- [x] 2026-11-21: Layer 1: chose to edit the one test line (`tests/test_corrections.py:264`).
+- [ ] Layer 1: make the branch (for example `git switch -c project3-layer1`; the uncommitted work moves with it), commit, push, PR, CI green, merge.
 - [x] 2026-11-21: Project 3 parallel split kept as proposed.
 - [ ] Uninstall the `code-review` and `code-simplifier` plugins (`/plugin`), then restart Claude Code so the `superpowers` setting takes effect.
 - [ ] Before Layer 6: decide the open items in `CLAUDE.md`, "Open decisions for Ibrahim".
@@ -218,7 +220,13 @@ Cycle 2 (deploy, UI, report):
 - `.gitignore`: `agentic-ai-foundations.pdf`, `Architecture.pdf` and `walkthroughs/` were ignored only by this clone's `.git/info/exclude`; now they are in `.gitignore`, plus a `*.pdf` catch-all. `datasheet-rag/runs/demo_script.md` (the step 10 demo GIF script; the demo was dropped) is ignored too.
 - Parallel split for Project 3 (Layers 3 and 5): the human said to leave it as proposed.
 - Plugins: the human installed `superpowers`, `code-review`, `code-simplifier`, `pr-review-toolkit`, `security-guidance` and `frontend-design`. Decided: `superpowers` off for this repo (`enabledPlugins` in `.claude/settings.json`); `pr-review-toolkit`'s `silent-failure-hunter` (Layers 3, 5, 6, 7) and `pr-test-analyzer` (layers with tests) added to the review step in `CLAUDE.md`; `security-guidance` kept; the plugin `code-review` and `code-simplifier` to be uninstalled by the human (duplicates of the built-in `/code-review` and `/simplify`).
-- Layer 0 done: PR #25 merged into `main` (`97530e8`), CI green on the PR. Next: Layer 1 planning, when the human says to start.
+- Layer 0 done: PR #25 merged into `main` (`97530e8`), CI green on the PR. The "Layer 0 done" notes were pushed to `main` (`42d0702`).
+- Layer 1 (in progress): plan approved. Built so far: `rag/retrieve.py` (`retrieve_passages` returns `passages`, `reranked` and `timings_ms`; `ms_since` moved there) and `answer_question` in `rag/pipeline.py` now calls it.
+- Problem: `test_pipeline_puts_published_notes_first` (`tests/test_corrections.py:264`) fails with `module 'rag.pipeline' has no attribute 'rerank'`. Why: the test puts its fake reranker in through `pipeline.rerank`, which `pipeline.py` no longer imports, and its fake does not accept the `k` that `retrieve_passages` now passes. Fix options asked of the human: edit that one test line (recommended), or keep it unchanged with two workarounds in the code. The human chose to edit the line: it now patches `rerank.rerank` directly with a fake that accepts `k` (recorded in the `CLAUDE.md` Differences log).
+- `tests/test_retrieve.py` written (14 tests, fakes only): arguments pass through, defaults left to the steps, timings, a question with no word gives no passages and calls neither embedder nor reranker (reranker on and off), `reranked` follows config, reranker off keeps search order.
+- Stale `__pycache__` folders deleted: test failures showed the old `P2 - RAG Pipeline` path, from compiled files made before the rename. Checks: 1,146 passed, 212 skipped; ruff clean.
+- The optional free check on the local database was skipped: Docker Desktop was not running.
+- Review (built-in `/code-review` medium and `pr-review-toolkit:pr-test-analyzer`). Problem found: `scripts/build_lambda.py` packs a fixed list of `rag` modules, and `retrieve` was not on it. Why it matters: the build checks that every packed file's imports are packed, so the next Project 2 Lambda build would have stopped (and without the check, the Lambda would fail on every request). Fix: `retrieve` added to `RAG_MODULES`; the check passes for both the API and ingest lists. Also fixed: `k` below 1 now raises `ValueError` (a slice with 0 or a negative number gives wrong results silently); the docstring says `reranked` reports the setting; a test that `answer_question` hands its embedder and rerank client to `retrieve_passages`. Not changed: `rag/kb.py`'s own `_ms_since`. Test analyzer: no gaps rated 7 or higher. Checks: 1,149 passed, 212 skipped. Review recorded.
 
 ## 2026-11-10 — Session 31: getting ready for LinkedIn traffic
 
