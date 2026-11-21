@@ -94,6 +94,10 @@ Format: `Layer N, date: what differs from the reference design, and why.`
 - Layer 1, 2026-11-21: one Project 2 test line changed, against "existing tests unchanged": `tests/test_corrections.py:264` now replaces `rerank.rerank` on its own module with a fake that accepts `k`, instead of reaching it through `pipeline.rerank`. Why: `pipeline.py` no longer imports `rerank`, and `retrieve_passages` always passes `k`; keeping the line would have needed an unused import and a special case in real code. What the test checks is unchanged (Ibrahim chose this, 2026-11-21).
 - Layer 2, 2026-11-21: `Deps` has `connect`, `retrieve`, `documents` only; the code tour's `budget_s` waits for the Layer 3 `Deadline` (not building ahead).
 - Layer 2, 2026-11-21: the local database needed `db.create_schema` (via `scripts/show_db.py`) before the first search: it was made before Cycle 2 step 9a added `documents.source`, which was applied to Aurora only. No code change.
+- Layer 3, 2026-11-21: `Deadline` is built and tested but not wired into the tool; `Deps` still has no `budget_s`. Why: the steps it limits (Aurora connect timeout, rerank slot, Cohere call) arrive in Layers 6 and 7; wiring it now would add checks that limit nothing (Ibrahim chose this, 2026-11-21).
+- Layer 3, 2026-11-21: the SDK's Pydantic text for bad inputs is kept, not shortened. Why: it names the field and the allowed values, and shortening it needs an override of SDK internals (Ibrahim chose this, 2026-11-21).
+- Layer 3, 2026-11-21: "log the detail" of unexpected exceptions needs no code: the SDK logs the traceback at ERROR (logger `mcp.server.mcpserver.server`) and sends only the generic text (read in the `mcp` 2.3.0 source, 2026-11-21). A `ToolError` arrives as `Error executing tool search_datasheets: <message>`.
+- Layer 3, 2026-11-21: `Deadline(total_s)` raises `ValueError` when `total_s <= 0` (proposal by Claude, in the approved plan).
 
 ### Status log
 
@@ -113,6 +117,10 @@ Format: `Layer N, date: what differs from the reference design, and why.`
   - NEW `datasheet_mcp/tools.py` (`DATASHEETS`, `Passage`, `SearchResult`, `Deps`, `shape`, `run_search`, `SEARCH_DESCRIPTION`) and `datasheet_mcp/server.py` (`build_server`, `real_deps`, `main`; stdio). Run from `datasheet-rag/`: `.venv\Scripts\python.exe -m datasheet_mcp.server`.
   - Test passed: Inspector UI listed the tool; LM35 call ($0, all cached) returned 10 passages, page 4 (absolute maximum ratings, 35 V) among them. Also over stdio: blank query gives the `ToolError` text; `num_results=11` is rejected by the SDK.
   - Inspector 2.13.0 flags that worked (stdio): `npx @modelcontextprotocol/inspector --cli --cwd <datasheet-rag> <venv python> -m datasheet_mcp.server --method tools/list` (or `--method tools/call --tool-name search_datasheets --tool-arg query=... --tool-arg datasheet=LM35`). UI: same with `--web` (the default). The mode flag must come first.
+- Layer 3, 2026-11-21 (built and reviewed on `project-3-layer-3`; waiting for Ibrahim's commit, PR and merge):
+  - NEW `datasheet_mcp/budget.py`: `Deadline(total_s, clock=time.monotonic)` with `remaining`, `cap`, `require`.
+  - NEW `tests/test_mcp_tool.py` (in-memory `Client` from `mcp`, fakes; `pytestmark = pytest.mark.anyio` and an `anyio_backend` fixture returning `"asyncio"`) and `tests/test_budget.py` (fake clock). Checks: 1,423 passed; ruff clean.
+  - Review (built-in `/code-review`, `silent-failure-hunter`, `pr-test-analyzer`): `total_s`, step limit and margin must be finite and not negative; docstrings say `require` before `cap`; tests that a crash is logged with its detail and a `ToolError` is not logged at ERROR. Open, for the layer that wires `Deadline` in: `cap` returns 0.0 when time is up, and libpq reads a `connect_timeout` of 0 as "wait forever" (and rounds values under 2 s up to 2 s; verify in the PostgreSQL docs then); decide whether `cap` raises instead. Open (Layer 2 code): `shape()` labels a document missing from `config.DOCUMENTS` with its raw name and a blank revision.
 
 ## Environment notes (both projects)
 
