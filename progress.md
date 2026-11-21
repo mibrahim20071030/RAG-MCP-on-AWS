@@ -17,7 +17,7 @@ Project 3 (remote MCP server), Layer 0:
 - [x] 2026-11-21: Layer 2 committed on `project-3-layer-2`, PR #27 merged (`d60a6d9`), CI green on `main`.
 - [x] 2026-11-21: Layer 3 plan approved (Deadline not wired yet; SDK validation text kept); branch `project-3-layer-3` made.
 - [ ] Read `walkthroughs/Project3/Layer3_Walkthrough.pdf`.
-- [ ] Layer 3: commit, push, PR, CI green, merge.
+- [x] 2026-11-21: Layer 3 committed on `project-3-layer-3`, PR #28 merged (`a73695e`), CI green on `main`.
 - [ ] Uninstall the `code-review` and `code-simplifier` plugins (`/plugin`), then restart Claude Code so the `superpowers` setting takes effect.
 - [ ] Before Layer 6: decide the open items in `CLAUDE.md`, "Open decisions for Ibrahim".
 
@@ -222,7 +222,7 @@ Cycle 2 (deploy, UI, report):
 - Review agents reported (code review still running). To fix: `Deadline` must reject infinity and NaN; a test that a crash is logged and a `ToolError` is not logged at ERROR; the bad-input tests check the validation text prefix; docstrings on `cap` returning 0.0, the `require` margin, and the message reaching Claude word for word. Reported, not fixed: `cap` of 0.0 as a connect timeout may mean "wait forever" (handle when `Deadline` is wired in); `shape()` labels an unknown document with its raw name and a blank revision (Layer 2 code).
 - Built-in code review agreed and rated `cap` returning 0.0 as important. Fixed: `Deadline` refuses a non-finite `total_s`; `cap` refuses a negative or non-finite step limit or margin; the module docstring says to call `require` before `cap` and never pass a 0.0 timeout on; `require`'s docstring says its minimum includes the margin and its message reaches Claude word for word; the clock read-count assertion removed (it tested how the code is written, not what it does); new tests: crash logged with its detail, `ToolError` not logged at ERROR, SDK rejections keep the validation prefix. `cap`'s signature is unchanged (the approved contract); whether it should raise instead is decided when `Deadline` is wired in. Checks: 1,423 passed. Review recorded (1 of 2).
 - Layer 3 walkthrough written: `walkthroughs/Project3/Layer3_Walkthrough.pdf`, 5 pages (Terms first), made from HTML with headless Edge.
-- Layer 3 ready for the human's commit, PR and merge.
+- Layer 3 done: the human merged PR #28 (`a73695e`); CI green on `main`. Next: Layer 4 (HTTP app, single agent) when the human says so, in plan mode.
 
 ## 2026-11-21 — Session 33: Project 3 Layer 2 (stdio MCP server)
 
