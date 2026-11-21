@@ -15,6 +15,9 @@ Project 3 (remote MCP server), Layer 0:
 - [x] 2026-11-21: Layer 2 plan approved; Docker started; Inspector UI test passed (10 LM35 passages).
 - [ ] Read `walkthroughs/Project3/Layer2_Walkthrough.pdf`.
 - [x] 2026-11-21: Layer 2 committed on `project-3-layer-2`, PR #27 merged (`d60a6d9`), CI green on `main`.
+- [x] 2026-11-21: Layer 3 plan approved (Deadline not wired yet; SDK validation text kept); branch `project-3-layer-3` made.
+- [ ] Read `walkthroughs/Project3/Layer3_Walkthrough.pdf`.
+- [ ] Layer 3: commit, push, PR, CI green, merge.
 - [ ] Uninstall the `code-review` and `code-simplifier` plugins (`/plugin`), then restart Claude Code so the `superpowers` setting takes effect.
 - [ ] Before Layer 6: decide the open items in `CLAUDE.md`, "Open decisions for Ibrahim".
 
@@ -207,6 +210,19 @@ Cycle 2 (deploy, UI, report):
   2026-11-10), `/api/ask` throttle rate 0.5, burst 10 (set by the human; the dev user cannot read API Gateway).
 - [ ] 10c. After the LinkedIn traffic: put both caps back to 50 and the `/api/ask` throttle back to rate 0.05, burst 3.
 - [ ] 11. Teardown checklist (including the Knowledge Base and feedback-loop resources), then confirm in Billing that spend has stopped. Wait until the LinkedIn traffic is over.
+
+## 2026-11-21 — Session 34: Project 3 Layer 3 (tool tests and `Deadline`)
+
+- Plan approved (parallel: one `layer-builder`, one `test-writer`). Decisions by the human: `Deadline` is built and tested only, and wired into the tool in Layer 6 or 7 (the steps it limits are not there yet); the SDK's Pydantic text for bad inputs is kept.
+- Checked in the installed `mcp` 2.3.0 source and a scratch run with fakes: `from mcp import Client` works in memory; a `ToolError` reaches the client as `Error executing tool search_datasheets: <message>`; any other exception gives only `Error executing tool search_datasheets`, and the SDK logs the traceback at ERROR itself; `anyio` (comes with `mcp`) registers the pytest plugin, so no new package or CI change.
+- The human made the branch `project-3-layer-3` from `main` before the build.
+- NEW `datasheet_mcp/budget.py`: `Deadline(total_s, clock=time.monotonic)` with `remaining`, `cap`, `require`; `total_s <= 0` raises `ValueError`. Small fix by the builder: `cap` wraps its answer in `float()`, because `min(2, 4.0)` hands back the whole number `2`.
+- NEW `tests/test_mcp_tool.py` (31 tests, in-memory `Client`, fakes) and `tests/test_budget.py` (22 tests, fake clock). Checks: secrets ok, ruff ok, pytest 1,414 passed.
+- Review started: built-in `/code-review`, `silent-failure-hunter`, `pr-test-analyzer`. `CLAUDE.md`: four Layer 3 lines in the Differences log and a Layer 3 status entry.
+- Review agents reported (code review still running). To fix: `Deadline` must reject infinity and NaN; a test that a crash is logged and a `ToolError` is not logged at ERROR; the bad-input tests check the validation text prefix; docstrings on `cap` returning 0.0, the `require` margin, and the message reaching Claude word for word. Reported, not fixed: `cap` of 0.0 as a connect timeout may mean "wait forever" (handle when `Deadline` is wired in); `shape()` labels an unknown document with its raw name and a blank revision (Layer 2 code).
+- Built-in code review agreed and rated `cap` returning 0.0 as important. Fixed: `Deadline` refuses a non-finite `total_s`; `cap` refuses a negative or non-finite step limit or margin; the module docstring says to call `require` before `cap` and never pass a 0.0 timeout on; `require`'s docstring says its minimum includes the margin and its message reaches Claude word for word; the clock read-count assertion removed (it tested how the code is written, not what it does); new tests: crash logged with its detail, `ToolError` not logged at ERROR, SDK rejections keep the validation prefix. `cap`'s signature is unchanged (the approved contract); whether it should raise instead is decided when `Deadline` is wired in. Checks: 1,423 passed. Review recorded (1 of 2).
+- Layer 3 walkthrough written: `walkthroughs/Project3/Layer3_Walkthrough.pdf`, 5 pages (Terms first), made from HTML with headless Edge.
+- Layer 3 ready for the human's commit, PR and merge.
 
 ## 2026-11-21 — Session 33: Project 3 Layer 2 (stdio MCP server)
 
