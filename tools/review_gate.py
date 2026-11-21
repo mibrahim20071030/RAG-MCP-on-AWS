@@ -2,7 +2,8 @@
 
 A "layer" here is all the work since the branch left main (committed or not). Rules:
   1. Code changed and the checks fail (tools/checks.py)  -> Claude is sent back to fix them.
-  2. Checks pass and the layer has had no review yet     -> Claude is asked to review before the PR.
+  2. Checks pass and the layer has had no review yet     -> Claude is asked to review before the PR
+     (non-error feedback, not a block).
   3. Checks pass and the layer has been reviewed         -> nothing more. Fixes made after a review
      only get the checks. A second review is Claude's call (only when a fix rewrote logic
      substantially) and MAX_REVIEWS is the limit.
@@ -10,6 +11,7 @@ A "layer" here is all the work since the branch left main (committed or not). Ru
 Claude records a finished review with:  python tools/review_gate.py --reviewed
 Show the current state with:            python tools/review_gate.py --status
 Markdown files do not count as code. State is kept in .claude/review_state.json (not in git).
+The hook stays quiet while background work (agents, a review) is still running; it runs again afterwards.
 """
 import hashlib
 import json
@@ -77,6 +79,18 @@ def emit(payload: dict) -> None:
     print(json.dumps(payload))
 
 
+def feedback(text: str) -> dict:
+    """Non-error feedback: Claude reads it and carries on, and Claude Code shows it as "Stop hook feedback", not as an
+    error. Used for reminders; a real failure (the checks) uses decision "block"."""
+    return {"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": text}}
+
+
+def waiting_for_background(hook_input: dict) -> bool:
+    """True when the turn ended while background work (agents, a review, a command) is still running. The hook then
+    stays quiet: the code may be half written, and it runs again once that work finishes and the next turn ends."""
+    return bool(hook_input.get("background_tasks"))
+
+
 def record_review() -> int:
     base = layer_base()
     state = load_state(base)
@@ -96,6 +110,8 @@ def stop_hook() -> None:
         hook_input = {}
     # True when Claude is already continuing because this hook blocked it once this turn.
     retrying = bool(hook_input.get("stop_hook_active"))
+    if waiting_for_background(hook_input):
+        return
 
     base = layer_base()
     state = load_state(base)
@@ -115,7 +131,7 @@ def stop_hook() -> None:
 
     save_state({**state, "fingerprint": current, "last_block": "review"})
     if state["reviews"] == 0:
-        emit({"decision": "block", "reason": REVIEW_REQUEST})
+        emit(feedback(REVIEW_REQUEST))
 
 
 def main() -> int:

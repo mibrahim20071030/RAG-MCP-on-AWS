@@ -5,6 +5,7 @@ to write it when files have changed and either:
   1. progress.md has no entry dated today, or
   2. a file was changed after progress.md was last saved (the entry is out of date).
 It asks at most once per turn, and only looks at files git would commit (not runs/, .venv/).
+Its reminder is non-error feedback (not a block), and it stays quiet while background work is still running.
 """
 import json
 import re
@@ -15,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import checks
+from review_gate import feedback, waiting_for_background
 
 LOG = "progress.md"
 SLACK_SECONDS = 2  # files saved in the same moment as the log count as covered
@@ -73,12 +75,12 @@ def main() -> None:
         hook_input = json.load(sys.stdin)
     except ValueError:
         hook_input = {}
-    if hook_input.get("stop_hook_active"):
-        return  # already sent back once this turn; do not loop
+    if hook_input.get("stop_hook_active") or waiting_for_background(hook_input):
+        return  # already sent back once this turn, or background work is still running
     reason = what_is_missing(date.today())
     if reason:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        print(json.dumps({"decision": "block", "reason": reason}))
+        print(json.dumps(feedback(reason)))
 
 
 if __name__ == "__main__":
