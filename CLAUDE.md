@@ -94,11 +94,11 @@ Format: `Layer N, date: what differs from the reference design, and why.`
 
 ### Status log
 
-- Layer 0, 2026-11-21 (in progress):
+- Layer 0, 2026-11-21 (done; PR #25 merged, `97530e8`):
   - Done: branch `project-3` created from `main`; Project 2's `CLAUDE.md` moved to `docs/CLAUDE_project2.md` with `git mv` (Ibrahim chose to build Project 3 inside this repo); this file is the root one; checks pass locally.
   - Done: the AWS billing alert. Ibrahim confirmed the zero spend budget in the console (status Healthy); the dev user `Ibrahim-Dev` cannot read budgets.
   - Done: the folder was renamed to `P2 & P3 - RAG and MCP`; the venv launchers were rebuilt for the new path; PDFs and `runs/demo_script.md` are in `.gitignore`.
-  - Open: CI green on the branch (needs the first push and pull request, done by Ibrahim).
+  - Done: CI green on the PR; merged into `main`.
 
 ## Environment notes (both projects)
 

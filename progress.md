@@ -7,7 +7,7 @@ One entry per working session, newest first. Each entry records the date, what w
 Project 3 (remote MCP server), Layer 0:
 
 - [x] 2026-11-21: AWS billing alert confirmed (zero spend budget, Healthy).
-- [ ] Commit the Layer 0 changes on branch `project-3` (the `CLAUDE.md` move and the new root `CLAUDE.md`), push, open a PR, and check that CI is green.
+- [x] 2026-11-21: Layer 0 committed on `project-3`, CI green, PR #25 merged (`97530e8`).
 - [x] 2026-11-21: Project 3 parallel split kept as proposed.
 - [ ] Uninstall the `code-review` and `code-simplifier` plugins (`/plugin`), then restart Claude Code so the `superpowers` setting takes effect.
 - [ ] Before Layer 6: decide the open items in `CLAUDE.md`, "Open decisions for Ibrahim".
@@ -218,7 +218,7 @@ Cycle 2 (deploy, UI, report):
 - `.gitignore`: `agentic-ai-foundations.pdf`, `Architecture.pdf` and `walkthroughs/` were ignored only by this clone's `.git/info/exclude`; now they are in `.gitignore`, plus a `*.pdf` catch-all. `datasheet-rag/runs/demo_script.md` (the step 10 demo GIF script; the demo was dropped) is ignored too.
 - Parallel split for Project 3 (Layers 3 and 5): the human said to leave it as proposed.
 - Plugins: the human installed `superpowers`, `code-review`, `code-simplifier`, `pr-review-toolkit`, `security-guidance` and `frontend-design`. Decided: `superpowers` off for this repo (`enabledPlugins` in `.claude/settings.json`); `pr-review-toolkit`'s `silent-failure-hunter` (Layers 3, 5, 6, 7) and `pr-test-analyzer` (layers with tests) added to the review step in `CLAUDE.md`; `security-guidance` kept; the plugin `code-review` and `code-simplifier` to be uninstalled by the human (duplicates of the built-in `/code-review` and `/simplify`).
-- Still open: the commit and push, CI green on the PR. Then Layer 1 planning.
+- Layer 0 done: PR #25 merged into `main` (`97530e8`), CI green on the PR. Next: Layer 1 planning, when the human says to start.
 
 ## 2026-11-10 — Session 31: getting ready for LinkedIn traffic
 
