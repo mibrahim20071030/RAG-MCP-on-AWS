@@ -9,6 +9,7 @@ Project 3 (remote MCP server), Layer 0:
 - [x] 2026-11-21: AWS billing alert confirmed (zero spend budget, Healthy).
 - [x] 2026-11-21: Layer 0 committed on `project-3`, CI green, PR #25 merged (`97530e8`).
 - [x] 2026-11-21: Layer 1: chose to edit the one test line (`tests/test_corrections.py:264`).
+- [ ] Read `walkthroughs/Project3/Layer1_Walkthrough.pdf` when convenient.
 - [ ] Layer 1: make the branch (for example `git switch -c project3-layer1`; the uncommitted work moves with it), commit, push, PR, CI green, merge.
 - [x] 2026-11-21: Project 3 parallel split kept as proposed.
 - [ ] Uninstall the `code-review` and `code-simplifier` plugins (`/plugin`), then restart Claude Code so the `superpowers` setting takes effect.
@@ -227,6 +228,7 @@ Cycle 2 (deploy, UI, report):
 - Stale `__pycache__` folders deleted: test failures showed the old `P2 - RAG Pipeline` path, from compiled files made before the rename. Checks: 1,146 passed, 212 skipped; ruff clean.
 - The optional free check on the local database was skipped: Docker Desktop was not running.
 - Review (built-in `/code-review` medium and `pr-review-toolkit:pr-test-analyzer`). Problem found: `scripts/build_lambda.py` packs a fixed list of `rag` modules, and `retrieve` was not on it. Why it matters: the build checks that every packed file's imports are packed, so the next Project 2 Lambda build would have stopped (and without the check, the Lambda would fail on every request). Fix: `retrieve` added to `RAG_MODULES`; the check passes for both the API and ingest lists. Also fixed: `k` below 1 now raises `ValueError` (a slice with 0 or a negative number gives wrong results silently); the docstring says `reranked` reports the setting; a test that `answer_question` hands its embedder and rerank client to `retrieve_passages`. Not changed: `rag/kb.py`'s own `_ms_since`. Test analyzer: no gaps rated 7 or higher. Checks: 1,149 passed, 212 skipped. Review recorded.
+- Layer 1 walkthrough given in the chat (including how one question flows: `retrieve_passages`, then notes, then Nova Lite), then written as a PDF at the human's request: `walkthroughs/Project3/Layer1_Walkthrough.pdf`, 6 pages, built with ReportLab in a scratch venv (code listings read from the repo). `walkthroughs/` is gitignored.
 
 ## 2026-11-10 — Session 31: getting ready for LinkedIn traffic
 
