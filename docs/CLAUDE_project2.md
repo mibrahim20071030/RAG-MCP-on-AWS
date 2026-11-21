@@ -1,0 +1,933 @@
+# Project 2: Datasheet RAG on AWS
+
+Question answering over component datasheets (ESP32, STM32, sensors) with page-level citations.
+Built in two cycles. Cycle 1 builds the pipeline and the evaluation locally. Cycle 2 deploys to AWS, adds the web UI, and writes the report.
+
+This file is the build plan. Read it fully before writing code. Work one layer at a time. A layer is finished only when its test passes.
+
+## Current status (update as layers finish)
+
+- Day 1 (learning and planning) is complete. All design decisions below are settled.
+- Layer 0, database part: DONE. Postgres with pgvector runs in Docker as container `rag-pg` from image `pgvector/pgvector:pg16`, port 5432, volume `rag_pgdata`. `CREATE EXTENSION vector` worked and a `<=>` query returned a distance. The container name and volume are fixed, so reuse them.
+- Layer 0, Python environment: the human created the folder `datasheet-rag` (inside `P2 - RAG Pipeline`), made `.venv` with Python 3.14.6, and ran `pip install pdfplumber "psycopg[binary]" boto3 pytest numpy`. Prebuilt Python 3.14 wheels were available for every package (numpy 2.5.4, psycopg-binary 3.3.6, Pillow, cryptography, and others), so no downgrade is needed locally. The pasted install log ended partway through, so first confirm it finished: activate `.venv`, run `pip list`, and run `python -c "import pdfplumber, psycopg, boto3, numpy, pytest"`. If anything is missing, rerun the pip command.
+- Layer 0, done on 2026-10-11: install confirmed (all five packages import). Git repo initialised at `P2 - RAG Pipeline` (branch `main`, no commits yet), with `.gitignore` at that root; code lives in `datasheet-rag/`. The four datasheets were moved to `datasheet-rag/data/pdfs/` (gitignored, as is `Project2_Study_Guide.pdf`). Folder layout, `rag/config.py`, `rag/costlog.py`, `rag/embed.py`, `scripts/test_embed.py`, `.env.example` and a `.env` with an empty `PGPASSWORD` exist. `rag-pg` restarts with `docker start rag-pg`.
+- Layer 0: DONE on 2026-10-11. `scripts/test_embed.py` printed 1024 and added one row to `runs/cost_log.csv`. psycopg connects to `rag-pg` with the password from `datasheet-rag\.env`. The AWS key is in `~\.aws\credentials`. Since 2026-10-12 its IAM user has only an inline Bedrock policy (InvokeModel on the four project models, Rerank, ListFoundationModels), so it cannot create Cycle 2 resources; the rerank action names are still to VERIFY at Layer 5. `list_foundation_models` in us-east-1 lists `amazon.titan-embed-text-v2:0`, `amazon.nova-lite-v1:0`, `amazon.nova-pro-v1:0` and `cohere.rerank-v3-5:0`; only Titan has been invoked. The first InvokeModel call returned "Your account is currently being verified" and succeeded on a retry some minutes later.
+- Titan V2 price verified on 2026-10-13: $0.02 per 1M input tokens on-demand ($0.01 batch), which matches `EMBED_USD_PER_1K_TOKENS = 0.00002` in `rag/config.py`. Nothing is left open from Layer 0.
+- Cohere Rerank 3.5 access: WORKS since 2026-10-13. The first use needed `aws-marketplace:Subscribe` and `aws-marketplace:ViewSubscriptions` on the dev user (a temporary inline policy; the managed policy `AmazonBedrockMarketplaceAccess` does not contain them). The call that starts the subscription is itself refused; a call a few minutes later goes through. The account is now subscribed and the human deleted the temporary policy; a new rerank call made after that was answered, so an identity with only `bedrock:Rerank` and `bedrock:InvokeModel` is enough from here on.
+- Layer 1: DONE on 2026-10-12. `rag/parse.py`, `tests/test_parse.py` (46 pass), `conftest.py` and `scripts/show_parsed.py` exist. `python -m rag.parse` writes `runs/parsed/<doc>.json` for the four datasheets (311 pages, 259 tables, none scanned). Each page has `page`, `page_label`, `text` (whole page), `text_outside_tables` and `tables` (`caption`, `rows`; a `null` cell is a merged cell, `""` is an empty one). A bare footnote marker is written in brackets (`GPIO16[2]`); a marker printed as `(1)` stays inline. The manual review covered 12 pages against rendered images; the two defects it found (values with no column lines, glued footnote markers) are fixed and re-checked. Details in `runs/parse_review.md`.
+- PR #1 (Layer 1, hooks, CI workflow) was merged on 2026-10-12; later fixes were pushed straight to `main`.
+- Parallel layer builds were set up on 2026-10-13 (see "Parallel layer builds"): `.claude/agents/layer-builder.md` and `.claude/agents/test-writer.md`. Layer 2 was the first trial, and on 2026-10-13 the human kept them for Layers 4 and 7. Lesson from it: try the contract's rules on real data while planning, because the Layer 2 table rules had to be rewritten at integration.
+- Layer 2: DONE on 2026-10-13, merged as PR #2. 329 tests pass (283 in `tests/test_chunk.py`). Files: `rag/chunk_base.py` (`approx_tokens` = characters / 4 rounded up, `make_chunk`), `rag/chunk_text.py` (headings, `page_chunks`, `fixed_chunks`, `structure_chunks`), `rag/chunk_tables.py` (`normalise_table`, `table_chunks`), `rag/chunk.py` (`chunk_document(parsed, strategy)`; `python -m rag.chunk` writes `runs/chunk_counts.csv`), `scripts/show_chunks.py`. The seven strategies and their sizes are `CHUNK_STRATEGIES` in `rag/config.py`. A chunk has `document`, `page`, `page_label`, `section`, `kind`, `text`, `strategy`.
+  - Chunks never cross a page. `page` is the whole page with tables as raw text; every other strategy takes text outside tables plus table chunks.
+  - Table text: caption line, then one line per row, `Label: value, Label: value`. A merged cell is filled from above only before the first filled cell of its row or in a unit column, and a number is never copied; any other merged cell is read as part of the cell on its left, which is labelled with every column it covers (`MIN / TYP / MAX: ±0.4`). Tables captioned "Figure" are skipped (10).
+  - Totals for the four datasheets: `page` 311, `fixed_256` 1,038, `fixed_256_overlap` 1,062, `fixed_400` 797, `fixed_400_overlap` 805, `structure_aware` 911, `fixed_1024` 577.
+  - Known limits are listed in `progress.md` (2026-10-13, "Still open"): missed section headings, three-row headers, value cells left empty, three figure fragments. `page` and `fixed_1024` are `rerank_limited`; a 400-token chunk can also pass the reranker's limit once the question is added, so Layer 5 must truncate.
+- Layer 3: DONE on 2026-10-13, merged as PR #3. 350 tests pass (`tests/test_db.py` 15, `tests/test_embed.py` 6). All 5,501 chunks of the seven strategies are in `rag-pg` with 1024-number vectors; `python scripts\show_db.py` compares the stored counts with Layer 2 and must end with "OK".
+  - Files: `rag/db.py` (all SQL; functions take a connection from `db.connect()`, which is autocommit, so use `conn.transaction()` for a multi-statement change), `rag/load.py` (`plan_load`, `load_document`; `python -m rag.load` prints calls and cost and stops, `--run` asks then loads, `--run --yes` does not ask, `--doc` and `--strategy` narrow it), `rag/embed.py` (`embed_text` for one string, `embed_texts` for many), `rag/costlog.py` (`read_rows`), `scripts/show_db.py`. Document part and revision are `DOCUMENTS` in `rag/config.py`.
+  - Schema as built is in the "Schema" section: `chunk_index`, two keyword columns `tsv_english` and `tsv_simple` (each with a GIN index), and `embedding_cache`. A vector goes in and comes out as the text `[0.1,0.2,...]` cast to `vector`; no `pgvector` Python package.
+  - `embedding_cache` holds every vector paid for, keyed by the SHA-256 of the text plus the model setup. Only 2,604 of the 5,501 chunk texts are different, a re-run makes no call, and a stopped load carries on. The header-prefix experiment changes only `load.embed_input` and is stored under its own strategy label.
+  - Cost: 863,130 tokens, $0.0173 for the whole load. Real Titan tokens were 1.29 times the characters / 4 estimate. The cost log has one row per batch of up to 100 texts.
+  - Speed: the account's Titan V2 on-demand quota is 60 requests a minute (the AWS default is 6,000) and 300,000 tokens a minute, both marked "Not adjustable"; verified in Service Quotas on 2026-10-13. So the load took about 45 minutes, and an increase cannot be requested there. Layer 7 embeds one question per call: plan for that rate, or cache question vectors.
+  - Tests that need Postgres run in a throwaway schema (`test_...`) with a fake embedder and skip when the database is not reachable.
+- Bedrock on-demand request quotas on this account, read by the human in Service Quotas (us-east-1) on 2026-10-13, all "Not adjustable" (AWS default in brackets): Titan Embeddings V2 60 a minute (6,000); Cohere Rerank 3.5 **3 a minute** (250); Nova Lite 100 (2,000); Nova Pro 13 (250). Token quotas were read only for Titan (300,000 a minute). What follows from them:
+  - Layer 5: the rerank client must wait between calls (3 a minute is one call every 20 seconds) and retry on throttling. Keep every rerank result in a cache keyed by question, chunk text and model, as `embedding_cache` does for vectors.
+  - Layer 7: one reranked run of 40 questions takes at least 14 minutes, so plan the number of reranker-on configurations around that and reuse cached results. Cache question vectors too. RAGAS with Nova Pro at 13 calls a minute is slow as well: count the judge calls in the dry run and print the time, not only the cost.
+  - Cycle 2: the public demo can rerank only 3 questions a minute for everyone together. Decide in the Cycle 2 plan (throttle the API to match, or serve without the reranker).
+- Layer 4: DONE on 2026-10-13 (parallel build), merged as PR #4. 518 tests pass (`tests/test_search.py` 168). The by-eye review of five questions is in `runs/search_review.md`.
+  - Files: `rag/search.py` (`query_terms`, `rrf`, `detect_part`, `uncached_questions`, `question_vector`, `vector_search`, `keyword_search`, `hybrid_search`, `search(conn, question, mode)` with mode `vector`, `keyword` or `hybrid`), three functions in `rag/db.py` (`nearest_chunks`, `keyword_chunks`, `explain_nearest`), `scripts/show_search.py`, `tests/conftest.py` (the shared `database` and `conn` fixtures). Settings in `rag/config.py`: `DEFAULT_STRATEGY` (`fixed_400`, a placeholder until Layer 8), `KEYWORD_CONFIGS`, `KEYWORD_CONFIG`, `RRF_C`, `DETECT_PART`, `PART_ALIASES`. `text_hash` and `embed_key` now live in `rag/embed.py`.
+  - A hit is a dict: `id`, `document`, `page`, `page_label`, `section`, `kind`, `text`, `score`; a hybrid hit adds `vector_rank` and `keyword_rank`. An argument of a search function left as `None` takes its value from `rag/config.py` when the function is called.
+  - Keyword ranking is not plain `ts_rank`. Each question word goes through `plainto_tsquery` on its own, and a chunk's score is the sum over the words it matches of a rarity weight, `ln(1 + (N - df + 0.5) / (df + 0.5))`, times `ts_rank(..., 1)`. Reason, found on the real chunks: plain `ts_rank` put an STM32 contents page first for "TCTH022BE supply voltage", because it does not know a part number is rare. No stop-word list of our own is used.
+  - N and df are counted inside the searched set, so a datasheet filter changes the keyword ranking (inside one datasheet its own part number is common). Keep this in mind when the `detect_part` experiment is judged at Layer 7.
+  - Question vectors are kept in `embedding_cache` by `search.question_vector`, keyed on the exact question text. `search.uncached_questions` gives the questions a run would pay for; use it for the Layer 7 dry run.
+  - Known keyword limits, not fixed: Postgres keeps `VDD/VBAT` as one token (322 such tokens), so `VDD` does not match it; `STM32F205` as an exact word is in 1 chunk (the datasheet writes `STM32F205xx`, `STM32F20x`), and prefix matching is not used because `GPIO1` would match `GPIO16`; `-40` is a signed token, so `40` does not match it. `detect_part` matches by prefix, so `LM358` would select the LM35 datasheet. For Cycle 2: every new question adds a row to `embedding_cache`, so a search needs write access; decide there whether the public demo caches.
+- Layer 5: DONE on 2026-10-13, merged as PR #5. 550 tests pass (`tests/test_rerank.py` 32); the code review is done and recorded. On the real model the two-chunk test passed (per-pin row 0.47, total-current row 0.08) and the five-question review is in `runs/rerank_review.md`: an answer chunk at rank 1 for four of five questions (three before reranking); "TCTH022BE supply voltage" stays at rank 4. Rerank scores are not comparable across questions, so no fixed score threshold. Cost so far: 8 queries, $0.016.
+  - Verified on 2026-10-13: reranking is `rerank` on the `bedrock-agent-runtime` client (one query, inline text sources, model ARN `arn:aws:bedrock:us-east-1::foundation-model/cohere.rerank-v3-5:0`; the answer has `index` and `relevanceScore`). IAM actions `bedrock:Rerank` and `bedrock:InvokeModel`. Price $2.00 per 1,000 queries, up to 100 documents a query, a document over 500 tokens counts as several.
+  - Files: `rag/rerank.py` (`rerank(conn, question, candidates, k=None, enabled=None)`, `uncached_count`, `calls_needed`, `rerank_text`, `rerank_key`), `rag/db.py` (table `rerank_cache`: `question_sha256`, `text_sha256`, `model`, `score`; `cached_rerank_scores`, `store_rerank_scores`), `scripts/show_rerank.py`. Settings: `RERANK_MODEL_ID`, `RERANK_ENABLED`, `RERANK_MAX_DOCS`, `RERANK_MIN_INTERVAL_S`, `RERANK_USD_PER_QUERY`.
+  - `rerank` returns copies of the best k hits: `score` is the relevance score, `search_score` the score the hit came in with. Switched off, it returns the first k candidates in the same shape and calls nothing.
+  - A score is cached per question, sent text and model id, so only texts not seen before are sent, and a change of k is free. The sent text is cut so that question plus text stay within `RERANK_MAX_TOKENS`; the hit keeps its full text. Calls are 20 seconds apart inside one process, and the estimate of one billed query per call holds for 30 candidates but may run low near 100 long documents. `calls_needed` is for the Layer 7 dry run.
+- Layer 6: DONE on 2026-10-14, merged as PR #6 (`b57b216`). 589 tests pass (`tests/test_generate.py` 39). The smoke run passed 6 of 6 (`runs/generation_smoke.md`): three answers cite the right page, three unanswerable questions get the fixed sentence. Cost $0.013, almost all reranking.
+  - Verified on 2026-10-14: Converse on the `bedrock-runtime` client (`modelId`, `system=[{"text"}]`, `messages`, `inferenceConfig` `maxTokens` / `temperature`; answer `output.message.content[].text`, `stopReason`, `usage.inputTokens` / `outputTokens`, `metrics.latencyMs`), IAM `bedrock:InvokeModel`. Nova Lite price $0.06 / $0.24 per 1M input / output tokens (Standard tier), read by the human on the pricing page.
+  - Files: `rag/generate.py` (`passage_label`, `build_context`, `system_prompt`, `build_prompt`, `call_llm`, `resolve_citations`, `is_not_contained`, `generate`), `scripts/show_generate.py`. Settings: `GENERATE_MODEL_ID`, `GENERATE_MAX_TOKENS` (512), `GENERATE_TEMPERATURE` (0), `GENERATE_USD_PER_1K_INPUT` / `_OUTPUT`, `NOT_CONTAINED`.
+  - A passage is `[n] <part> (<document>), page <page>` (plus the printed page when it differs) and the chunk's full text. `generate` returns `answer`, `sources` (`label`, `id`, `document`, `page`, `page_label`; each label once, in order of use), `invalid`, `not_contained`, `cut_off`, token counts, `stop_reason`, `latency_ms`. With no chunks it returns the sentence and calls nothing.
+  - "Not contained" is one fixed sentence the model must give; `is_not_contained` is true when it is there (final full stop optional) and nothing valid is cited. A reworded refusal is missed: watch for it in Layer 7.
+  - Citations read: `[n]`, `[n, m]`, `[n][m]`, `[n-m]`. A label glued to a word counts unless that word with the same brackets is in a passage (a copied footnote marker such as `GPIO16[2]`). A footnote marker standing alone in a passage (`Note: [3]`) can still be confused with a passage label; not seen yet.
+  - Each call writes two cost log rows (input and output tokens). A stop reason other than `end_turn` or `max_tokens` raises after logging. No answer cache.
+- Layer 7 split, as decided with the human on 2026-10-14: 7a is questions, metrics, `run_eval` and every retrieval comparison, plus answer checks for a shortlist; 7b is RAGAS with Nova Pro and gets its own plan.
+- Layer 7a: DONE on 2026-10-14 (parallel build), merged as PR #7 (`c3f8bb7`). The code review is done and recorded (1 of 2). Results are in `runs/eval_review.md`.
+  - Questions: `data/questions.jsonl` has 49, checked by Claude against the rendered PDF pages, at the human's request: 22 table lookups, 10 single values, 6 rephrased, 5 comparisons, 6 with no answer. It is frozen; the draft and its checks are in `runs/questions_draft.md`.
+  - Files:
+    - `rag/eval/questions.py`: `load_questions`, which validates every line.
+    - `rag/eval/metrics.py`: `recall_at_k`, `mrr`, `index_recall`, `refusal_rates`, `citation_hit_rate`, `by_type`.
+    - `rag/eval/experiments.py`: `BASELINE` and `EXPERIMENTS`, a Python dict, not YAML.
+    - `rag/eval/run_eval.py`.
+    - `rag/db.py`: the HNSW functions. The index is built inside a rolled-back transaction, so the database is never changed.
+    - `rag/load.py`: the header prefix. The strategy `<name>_prefix` embeds "part (document). section" on a line before the text.
+    - Settings in `rag/config.py`: `QUESTIONS`, `EVAL_DIR`, `RESULTS`, `RESULTS_BY_TYPE`, `EVAL_KS`, `EVAL_RERANK_K`, `EMBED_PER_MIN`, `GENERATE_PER_MIN`, `HEADER_PREFIX`.
+  - One run gives two summary rows, the search order and the reranked order. The reranker keeps 10 in eval, so R@1/3/5/10 and MRR@10 come from one list.
+  - Outputs:
+    - `runs/results.csv`: one row per experiment and reranker state;
+    - `runs/results_by_type.csv`;
+    - `runs/eval/<experiment>.csv`, one row per question.
+  - Results:
+    - Hybrid is the best search order.
+    - The reranker lifts every setup to about R@5 0.977.
+    - `page` chunking is clearly worst.
+    - `english` keywords beat `simple`.
+    - HNSW index recall is 0.995, so exact search stays.
+    - The header prefix (`fixed_400_prefix`, loaded) gives the best search order: MRR 0.834 against 0.766.
+    - Answers: prefix with k 10 cites the right page for 40 of 43 questions. False refusals by Nova Lite are the main failure.
+  - Shortlist for 7b: prefix k 10, prefix k 5, `detect_part` k 5, and the baseline.
+  - Layer 6 changed in 7a:
+    - `is_not_contained` also accepts the refusal sentence followed only by labels.
+    - The prompt has a rule to read every passage and to refuse without citations. It made no measurable difference.
+    - A reworded refusal ("Sorry, I cannot provide ...") was still missed (detected since 2026-10-24, see the
+      refusal-detection fix).
+  - Spend: $1.31 in total, $1.20 of it on reranking.
+- Layer 7b: DONE on 2026-10-14 (single agent), merged as PR #8 (`14dd8f1`). Results and the review by hand are in `runs/ragas_review.md`.
+  - RAGAS 0.4.3 runs in a second venv, `datasheet-rag/.venv-ragas` on Python 3.13, because its dependency `scikit-network` has no 3.14 build. Pins are in `datasheet-rag/requirements-ragas.txt`. LangChain must stay on 0.3: RAGAS 0.4.3 imports `langchain_community.chat_models.vertexai`, which 0.4 removed. Only `ragas_run` needs that venv; the project, its tests and CI stay on 3.14 (all tests also pass on 3.13).
+  - Nova Pro price verified by the human on 2026-10-14: $0.80 / $3.20 per 1M input / output tokens. The `JUDGE_*` settings are in `rag/config.py`.
+  - Files:
+    - `rag/eval/judge_inputs.py`: the 7a answers plus passages rebuilt from the caches with no paid call; the citations must match the 7a CSV. Also `plan_judge`. No RAGAS import.
+    - `rag/eval/ragas_run.py`: `logged_completion` (judge calls 5 s apart, throttling retried, cost logged), `make_scorers` (`Faithfulness` and `AnswerRelevancy` from `ragas.metrics.collections`, LiteLLM `bedrock/amazon.nova-pro-v1:0`, Titan through `search.question_vector`), resumable `runs/ragas/<experiment>.csv`, summary in `runs/results_ragas.csv`.
+    - `tests/test_judge.py`: 28 tests, no RAGAS import. 787 tests pass in all.
+  - The rebuild is checked three ways: the top 10 ranking must equal the 7a CSV's `rerank_hits`, the citations must match, and an answer that is only labels is refused before any paid call.
+  - Known limit: a re-run of a 7a generation experiment does not clear its judged rows. Delete `runs/ragas/<experiment>.csv` before judging new answers.
+  - The code review is done and recorded (1 of 2).
+  - Faithfulness makes 2 judge calls per answer. Answer relevancy is run with strictness 1 (RAGAS's default is 3), because at temperature 0 the three calls would write the same question.
+  - Results for the four shortlisted setups (43 answerable questions each):
+    - `gen_prefix_k10` is best: faithfulness 0.972, relevancy 0.859. The other three are 0.83–0.86 and 0.78–0.79.
+    - False refusals score 0 on both metrics, so the means follow the 7a refusal counts.
+    - Over answered questions only, faithfulness is 0.97–0.995 in every setup, and relevancy does not separate the setups.
+    - The judge caught a wrong answer that 7a counted as correct (q08: the LM35 given the LM35A's accuracy) and a self-contradicting one (q25 at k 10).
+    - It was wrong on 2 of 21 refusals (q33: the verdict disagrees with its own reason).
+    - It cannot see mis-citations, so the 7a citation check stays.
+  - Spend: $0.87 for the whole of 7b.
+- Layer 8: BUILT on 2026-10-14 (single agent), waiting for the human's PR. 799 tests pass; the code review is done and recorded (1 of 2). The decision, numbers, failures, known limits and spend are in `runs/cycle1_summary.md`.
+  - Frozen in `rag/config.py`: `DEFAULT_STRATEGY = "fixed_400_prefix"`, `SEARCH_MODE = "hybrid"` (new), `KEYWORD_CONFIG` `english`, `N_CANDIDATES` 30, `RERANK_ENABLED` True, `TOP_K` 10, `DETECT_PART` False. `tests/test_pipeline.py` asserts these, so a change must be deliberate. `rag/eval/experiments.py` `BASELINE` stays the 7a baseline.
+  - Question set frozen by `QUESTIONS_SHA256`, taken over the text with "\n" line endings (Git on Windows checks out "\r\n"); checked in `tests/test_questions.py`. Editing `data/questions.jsonl` breaks that test on purpose.
+  - The `show_*` scripts take `--strategy` from `load.strategy_names()` (every strategy and its `_prefix` form). `python -m rag.load` with no `--strategy` now loads the seven strategies plus `DEFAULT_STRATEGY`, so a fresh load (Aurora in Cycle 2) includes the one the pipeline searches.
+  - An empty search makes `format_answer` print a warning, so it is not mistaken for a real "not contained" answer.
+  - `rag/pipeline.py`: `answer_question(conn, question, document=None, embed_fn=None, rerank_client=None, generate_client=None)` returns the `generate` result plus `question`, `passages`, `timings_ms` (`search` includes the question embed, `rerank`, `generate`). `format_answer(result)`. The CLI (`--document` optional) does not ask before paid calls (human's choice); it prints the spend afterwards. A new question costs about $0.0023, a cached one about $0.0003.
+  - Checked on 2026-10-14: q01, q18, q29 cite the right page, q47 refused, a new TCTH question answered from page 2. Cycle 1 spend in total: $2.23.
+  - The reworded-refusal miss stayed a known limit (human's choice) until the 2026-10-24 refusal-detection fix.
+- Layer 8 merged as PR #9 (`ead7ff3`).
+- Layer 8b: DONE on 2026-10-14 (single agent), merged as PR #10 (`0988c26`). The Windows port fix that came after it was pushed straight to `main`. It adds a local web UI and a README written for recruiters.
+  - `rag/api.py`: `ask(conn, payload, answer_fn=None) -> (status, body)` and `documents(conn)`, with no HTTP, so a Cycle 2 handler can call them unchanged.
+    - Errors: 400 for an empty question, more than `API_MAX_QUESTION_CHARS` (500) characters, or an unknown document; 429 when AWS throttles; 502 for other AWS failures or a step's `RuntimeError`; 503 when the database is down.
+    - Sources carry `pdf_url` = `/pdfs/<file>#page=<page>`.
+  - `rag/server.py`: `python -m rag.server [--port]`, standard library `HTTPServer`.
+    - Binds only to `127.0.0.1`, and rejects requests whose Host header is not localhost (DNS rebinding).
+    - `POST /api/ask` needs `Content-Type: application/json`, which stops cross-site form posts.
+    - `/pdfs/<file>` serves only files on the stored documents' allow-list.
+    - It keeps one DB connection and reconnects after Postgres restarts.
+  - `web/index.html`: one static page using the `ui-ux-pro-max` design system.
+    - Dark by default, plus a light theme. Fonts: JetBrains Mono and IBM Plex Sans. Icons: Lucide.
+    - `[n]` badges link to source cards, which open the PDF at the cited page.
+    - Deep links: `?q=...&doc=...` fills in the question and asks it.
+    - Audited with `web-design-guidelines`.
+  - `pipeline.warnings(result)` is public. Cost per request comes from `costlog.row_count()` and `costlog.spent_since(n)`, which `pipeline`, `api` and `run_eval` all use.
+  - `generate.citation_spans(answer, chunks)` gives the citing brackets by the rules of `resolve_citations`. The API returns them as `answer_parts`, and the page links only those.
+  - A `?q=` link only fills in the form and never asks, because asking costs money.
+  - The server returns a JSON 500 for any unexpected error, has a 15 s socket timeout, and reads the PDF allow-list once.
+  - Code review: 1 of 2 for Layer 8b, done and recorded. 858 tests pass.
+  - The server turns off `SO_REUSEADDR` on Windows (`allow_reuse_address`). Otherwise a second `python -m rag.server` silently shares port 8000 with the first.
+  - Settings: `WEB_DIR`, `SERVER_HOST`, `SERVER_PORT`, `API_MAX_QUESTION_CHARS`, `API_MAX_BODY_BYTES`.
+  - Install file: `datasheet-rag/requirements.txt` (pinned). The README screenshot is `docs/ui.png`, taken with headless Edge (`--force-dark-mode`; headless Edge cannot go narrower than about 492 px).
+  - `README.md` is for recruiters: results, evaluation and limits. It does not mention Cycle 2 or how the build was organised (the human's choice). It was checked with `writing-guidelines`.
+  - The Chrome extension was not connected, so the UI was tested with `curl` and headless Edge.
+- Cycle 1 is complete.
+- Cycle 2 step 7b (cost fix): DONE on 2026-10-23 (single agent), deployed and checked, merged as PR #19 (`23161dc`).
+  Console steps and results in `datasheet-rag/runs/cost_fix.md`. 799 tests pass; code review done and recorded
+  (1 of 2), 9 of 10 fixed. The step 7 cost risk is closed.
+  - Deployed checks (all passed, spend $0.0003): every refusal (404, 400, 413, 415) answered in under 0.3 s with no
+    `connect_ms`, and `ServerlessDatabaseCapacity` stayed at 0; at the cap, 429 `"daily"` with no connect;
+    `DEMO_ENABLED=false` gave the 503 through `SITE_URL` and `execute-api`; one cached ask 200 in 20.6 s (Aurora
+    resuming), count 1 of 50.
+  - A request that will not be answered never reaches Aurora: off switch (`DEMO_ENABLED`), route, JSON and question
+    checks (`api.check_ask`, datasheets from `config.DOCUMENTS`) and the daily cap come first. The cap is counted in
+    DynamoDB (`rag/usage.py`: `take`, `release`, `count`, `today`; table `USAGE_TABLE`, item `asks#<day>`).
+    `api.ask(payload, open_conn, answer_fn=None, counter=None)` opens the connection only after that. A place
+    goes back only when nothing was paid for.
+  - `GET /api/documents` is gone from the Lambda (local server keeps it). The `api_usage` functions are gone
+    from `rag/db.py`; the table stays on Aurora, unused.
+  - Cap 50 a day (`DEPLOYED_DAILY_LIMIT`). A full deployed eval (98 asks) needs it raised for that day.
+  - DynamoDB on-demand checked on 2026-10-23: $0.625 per million writes, $0.125 per million reads; TTL deletes free.
+- Cycle 2 step 8 (Managed Knowledge Base): DONE on 2026-10-24 (single agent), deployed, tested on both pipelines,
+  merged as PR #20 (`0bbe078`).
+  - Plan: `C:\Users\muham\.claude\plans\plan-to-build-step-fluttering-quilt.md`. Setup in
+    `datasheet-rag/runs/kb_setup.md`, results in `datasheet-rag/runs/kb_compare.md`.
+  - The KB: Managed KB `datasheet-rag-kb`, data source `datasheets` on S3 bucket `datasheet-rag-kb-...` (the 4 PDFs
+    under `kb/`, each with a `.metadata.json` sidecar giving `document` and `part`, written by
+    `scripts/kb_prepare.py`).
+    - Managed embedder, parser, default chunking; media indexing and the deletion safeguard off.
+    - Sync took about 4 minutes.
+    - `KB_ID` is in `.env` and in the Lambda.
+    - The ARN is not shown in the AgentCore console; use CloudShell `aws bedrock-agent get-knowledge-base`.
+    - Inline policy `rag-kb-query` (`bedrock:Retrieve` on the KB) on the dev user and on the Lambda role.
+  - Verified on 2026-10-23 (docs and probe):
+    - Managed KB prices: $5 per GB of raw data a month; `Retrieve` $1 per 1,000; managed embedding, parsing and
+      reranking $0.
+    - 600 `Retrieve` a minute.
+    - Query with `managedSearchConfiguration` (`numberOfResults`, `rerankingModelType` `MANAGED`, `filter`
+      `equals`).
+    - Results carry `content.text`, `score`, `_source_uri` (https), `_chunk_id`, `_excerpt_page_number` (a float,
+      the 1-based PDF page as our `page`) and our sidecar keys. Table chunks add `_table_id` and
+      `_table_section_title`.
+    - 7 of 490 ESP32 passages had no page (not explained).
+  - Code:
+    - `rag/kb.py` (`retrieve`, `to_hit`, `answer_question`, `warnings`, CLI `python -m rag.kb "..."`).
+    - `api.ask(..., kb_answer_fn=None)` with `check_pipeline`: the KB path never calls `open_conn`, counts as
+      `kb_asks` (`KB_DAILY_ASK_LIMIT`, Lambda 50), and builds links from `config.DOCUMENTS`. `setup.pipeline` is in
+      every 200.
+    - The handler logs `pipeline`.
+    - Page toggle (`#pipeline`, `?p=kb`); the total time sums every timing.
+    - `pipeline.format_answer(result, warnings_fn=None)`.
+    - `rag/eval/kb_eval.py` (rows and summary in run_eval's columns, experiment `kb_managed`),
+      `scripts/compare_pipelines.py`.
+    - `deployed_eval` `--pass kb` (no Aurora in its plan; retrieve stored as `search_ms`).
+    - `call_api.py ask --pipeline kb`.
+    - Settings: `PIPELINES`, `KB_ID`, `KB_PAGE_KEY`, `KB_DOCUMENT_KEY`, `KB_USD_PER_RETRIEVE`, `KB_USD_PER_GB_MONTH`,
+      `KB_DIR`, `KB_DAILY_ASK_LIMIT`, `DEPLOYED_KB_DAILY_LIMIT`.
+  - Local results (49 questions):
+    - KB: R@5 0.860, MRR 0.800, citation hit 0.837, unanswerable refused 6/6, $0.0012 a question.
+    - Ours: R@5 0.977, MRR 0.865, citation hit 0.930, unanswerable refused 6/6 (5/6 before the 2026-10-24
+      re-score), $0.0023 a question.
+    - The KB loses on table lookups and comparisons.
+  - Deployed checks passed (2026-10-23): unknown `pipeline` 400; a KB ask 200 in 2.5 s with no `connect_ms`.
+  - Deployed KB pass: 48 of 49, then the KB cap stopped q49. q49 was asked later (cap raised to 53 by the human),
+    so 49/49.
+    - KB: citation hit 0.837, client p50 1,656 ms, no Aurora connect in any row.
+    - Ours (step 7): 0.930, p50 1,088 ms.
+    - About $0.0012 a question for the KB, against $0.0041 for ours with Aurora.
+    - q21's first answer was lost between CloudFront and the client and was resent.
+  - Code review done and recorded (1 of 2); 8 of 10 fixed, 848 tests pass. The fixed zip (22,748,347 bytes) is
+    live (uploaded and checked 2026-10-24). The Lambda's `KB_DAILY_ASK_LIMIT` is back to 50 (checked 2026-10-24).
+  - Step 8 spend: $0.12.
+- Refusal-detection fix: DONE on 2026-10-24 (single agent), merged as PR #21 (`919ac80`), deployed.
+  - Checked live: Lambda code size 22,748,983 bytes; the served page equals the local file.
+  - No paid call; the prompt is unchanged.
+  - `generate.is_not_contained` has a third rule: no valid source, plus `_MISSING` plus `_SOURCE_MATERIAL`.
+    - `_MISSING`: cannot provide / be determined, does not contain / mention / specify, not or n't mentioned /
+      specified / provided, no information, ...
+    - `_SOURCE_MATERIAL`: datasheet(s), passage(s), document(s).
+    - The two patterns share no word: after the review, "provided" was taken out of the source pattern.
+    - `_words` turns a curly apostrophe into a straight one.
+    - A cited answer is never a refusal.
+    - Still missed: a refusal that cites a passage, or wording outside the patterns.
+  - `scripts/rescore_refusals.py` (`--write` to apply) re-checks `runs/eval/*.csv` and `runs/deployed/*.csv` and
+    updates the refusal columns of `runs/results.csv` and `runs/results_deployed.csv`.
+    - Of 493 saved answers, only `gen_prefix_k10` q44 changed: unanswerable refused 0.833 to 1.000, citation hit
+      unchanged.
+    - Older Layer 7 rows of the "sentence, then only labels" kind keep their label pages in `cited`; they were
+      refusals already and are left alone.
+  - Page: a refusal in other words is shown under the "don't cover this" notice ("In the model's words: ..."), so
+    an uncited partial answer is not hidden. The page's `NOT_CONTAINED` constant is kept equal to config by
+    `tests/test_page.py`.
+  - Re-score `--write`:
+    - patches only the refusal columns of `results.csv` (the only ones there that read the flag), keeping the file's
+      header;
+    - rebuilds `results_deployed.csv` with `deployed_eval.summarise`, keeping the hand-read Aurora share.
+    - The rebuild moved `same_as_local` to 47/49 for `first` and 46/49 for `cached` (q44 now agrees).
+  - Tests: 22 new cases in `tests/test_generate.py`, 1 in `tests/test_page.py`, `tests/test_rescore_refusals.py` (8).
+    879 pass.
+  - Code review done and recorded (1 of 2), 8 of 9 fixed. The 9th, the live Lambda still on the old rule, is
+    fixed by the zip upload.
+  - Zip rebuilt (22,748,983 bytes). The page changed too, so it needs an upload and an invalidation.
+  - Toggle renamed at the human's request (2026-10-24):
+    - buttons "Custom pipeline" and "AWS managed", each with a one-line tooltip. The visible "Search engine"
+      label was removed at the human's request; it stays as the group's `aria-label` for screen readers;
+    - "Response details" uses the same names;
+    - the API values stay `ours` / `kb`;
+    - on a phone the toggle gets its own row.
+- Cycle 2 step 9a (PDF upload): DONE on 2026-10-24 (single agent), deployed, checked on both pipelines, merged as
+  PR #22 (`7f605b9`). Plan:
+  `C:\Users\muham\.claude\plans\alright-so-if-there-serene-papert.md`; console guide and doc checks in
+  `datasheet-rag/runs/upload_setup.md`. Code review done and recorded (1 of 2), 10 of 10 fixed; 1,227 tests pass.
+  - Limits (the human's choice): 10 MB, 100 pages, 300 chunks, 5 uploads a day (`UPLOAD_DAILY_LIMIT`, kind
+    `uploads`), kept 24 h. One upload is processed at a time (lock item `ingest_lock` in `USAGE_TABLE`).
+  - Flow:
+    - `POST /api/uploads` returns a presigned S3 POST to `incoming/<id>.pdf`;
+    - the S3 event starts `handler.ingest_handler` in the new function `datasheet-rag-ingest` (`build/ingest.zip`,
+      pdfplumber);
+    - `ingest.run_upload` parses, chunks (`fixed_400_prefix`), embeds at 40 a minute, then connects and stores;
+    - it then copies the PDF and its sidecar to `kb/` and starts the KB's `uploads` data source sync;
+    - `GET /api/uploads/{id}` gives the record (DynamoDB `upload#<id>`);
+    - `/api/ask` takes `upload_id`.
+  - Isolation:
+    - an upload is document `upload-<id>`, `documents.source = 'upload'`;
+    - searches and counts that name no document read only curated rows;
+    - KB searches of all datasheets filter on `_data_source_id` = `KB_CURATED_DATA_SOURCE_ID` (they refuse to run
+      without it once an uploads source is set);
+    - an upload's file name never reaches the prompt.
+  - Locally `rag.server` takes a PUT and ingests in a thread, our pipeline only (in-memory records).
+  - Console work done (2026-10-24); Aurora migrated; the `_data_source_id` filter works (probe: same 10 passages as
+    unfiltered, 0 on the empty uploads source); free deployed checks passed, S3 refuses 11 MB (`EntityTooLarge`).
+    `KB_ID` must be the 10-character ID, not the ARN (the ingestion job calls need it).
+  - Paid checks passed (2026-10-24, about $0.08): one upload (37 pages, 59 passages) ready on ours in under 2 minutes
+    and on the KB 3.5 minutes later; 3 questions on each cite the right pages and refuse what the upload lacks;
+    without `upload_id` the upload is not searched; the 49 KB `Retrieve` keep their step 8 first correct ranks.
+  - Page tidied on 2026-10-24 (steps without descriptions; paperclip upload and status chip inside the question box;
+    datasheet and pipeline behind one options button). Walkthrough written: `walkthroughs/Step9a_Walkthrough.pdf`.
+  - Closed on 2026-10-24: both Lambda ask caps back to 50 (checked), the tidied page live (equal to the local file
+    once line endings are compared the same way), merged as PR #22.
+- Cycle 2 step 9b (feedback loop): DONE on 2026-10-28 (single agent), deployed, tested on both pipelines, merged as
+  PR #23 (`c70cd7b`). Walkthrough: `walkthroughs/Step9b_Walkthrough.pdf`. Plans: `C:\Users\muham\.claude\plans\plan-to-build-9b-effervescent-dream.md`
+  and, for the shared matcher, `C:\Users\muham\.claude\plans\temporal-tinkering-rabbit.md`. Setup:
+  `datasheet-rag/runs/feedback_setup.md`. Results: `datasheet-rag/runs/feedback_eval.md`.
+  - Built:
+    - `rag/records.py`: answer, rating and note records in `datasheet-rag-usage`.
+    - `rag/corrections.py`: `match` (ours), `kb_match` (the AWS managed side), publish, refresh, retract, discard.
+    - `rag/review.py`: the reviewer API.
+    - `api.feedback`; an `answer_id` on every curated 200.
+    - Handler routes `POST /api/feedback` and `/api/review/*`. The reviewer group is checked on top of API
+      Gateway's JWT authorizer, and `REVIEW_AUTH` is never set in Lambda.
+    - `web/review.html`: dark, list beside the open item, Discard, button rules per status, Finish retract.
+    - The 👎 / 👍 row in `index.html`.
+    - `data/correction_cases.jsonl` (12 cases) and `rag/eval/correction_eval.py`.
+  - **One matcher for both pipelines (the human's choice, 2026-10-28):** the Titan cosine similarity of question and
+    note, at least `CORRECTION_MIN_SIMILARITY` = 0.70 (it separates all 12 cases from the other 46 questions, by
+    about 0.03 on each side).
+    - Ours: pgvector on the Aurora `corrections` table, with the search's question vector.
+    - The AWS managed side: DynamoDB item `notes#list` holds each published note's text and vector (base64
+      float32, equal to Aurora's); the question is embedded once with Titan, only while a note that could fit is
+      published; the KB path never wakes Aurora. A notes failure answers without notes.
+    - Not the KB's own Retrieve: its scores only rank the notes for one question (reranker on: 0.37–0.50 for fits
+      and non-fits alike; off: set by the rank), so no threshold works.
+    - The list is edited in place by every publish and retract (consistent read, written with a `version` check),
+      never rebuilt from a Scan; the first edit seeded it from the notes already published. The old item
+      `notes#published` is no longer read. At most `CORRECTION_MAX_PUBLISHED` (50) notes fit the 400 KB item.
+    - Publish goes live on both at once. A retract whose database does not answer leaves the note out of the KB side
+      with `ours` "retracting" (503); retracting again finishes it ("Finish retract" on the page).
+    - The Notes page shows each note's record, not a live check of either side.
+  - Code reviews 2 of 2 done and recorded (first 9 of 9 fixed; second 7 of 10 fixed, the three left with reasons in
+    `progress.md`, 2026-10-28). 1,317 tests pass.
+  - Deployed and checked:
+    - Cognito pool `datasheet-rag-review` (Essentials; no Lite on this account), group `reviewers`;
+    - JWT authorizer `cognito-reviewers`;
+    - inline policy `rag-feedback` on the Lambda role (now only `dynamodb:Scan` on the usage table);
+    - Aurora `corrections` table;
+    - Lambda `CORRECTION_MIN_SIMILARITY=0.7`; zip 22,819,901 bytes.
+    - The notes bucket and the KB data source `corrections` were deleted on 2026-10-28 (no longer used).
+      `CORRECTION_BUCKET` was removed from the Lambda the same day.
+  - Three notes are published (q08 LM35 p.5, q24 ESP32 p.46, q33 STM32 p.71).
+  - Results (12 cases × 2 pipelines): before, 0/3 originals and 1–2/6 paraphrases passed; after, 3/3 and 6/6 on
+    both pipelines, each with its own note, and 3/3 negatives with no note. Retract test: q24 refused on both with
+    the note retracted, as before it. Step 9b spend about $0.18.
+- Permanent uploads were considered on 2026-10-28 and skipped (the human's choice): uploads stay private and are
+  deleted after 24 h.
+- Cycle 2 step 9c (both tested again): DONE on 2026-10-28 (single agent), merged as PR #24 (`6f5852b`). Results in
+  `datasheet-rag/runs/retest_9c.md`; walkthrough `walkthroughs/Step9c_Walkthrough.pdf`; spend about $0.08.
+  - A (free): only q08, q24, q33 and their cases reach 0.70 (q29 next at 0.605).
+  - B, the 49 on the site with notes on (`deployed_eval` passes `notes`, `kb_notes`): 49/49 on both; notes given
+    only to q08, q24, q33 on both; citation hit ours 0.977 (cached 0.953), KB 0.884 (step 8 0.837); answerable
+    refused ours 0/43, KB 1/43; unanswerable 6/6 on both; no KB request connected to Aurora. q24 and q33 fixed on
+    both; the other changes had no note (Nova Lite noise).
+  - C, uploads (`rag/eval/upload_eval.py`, `data/upload_cases.jsonl`): 8/8, including the isolation case u4 (an
+    upload question asked without `upload_id` is refused on both).
+  - Changed on the way: `generate._SOURCE_MATERIAL` also matches "the / given / provided context" (the KB's u4
+    reply); `deployed_eval` gains `compare`, `answer_id` / `notes_used` columns, the Aurora share limited to the step
+    7 passes (`AURORA_PASSES`) and CloudWatch numbers only from rows matched "ok"; `upload_eval run --upload-id`
+    and `rescore`; `multipart` and `settled` in `rag/uploads.py`. Lambda zip 22,831,264 bytes, live (checked).
+  - Code review 1 of 2 done and recorded, 8 of 10 fixed. 1,344 tests pass.
+  - The KB's upload sync took over 15 minutes once (3.5 in 9a); cause unknown (the dev user cannot read ingestion
+    jobs). `upload_eval run --upload-id` reuses an upload.
+- Cycle 2 step 10 (report): DONE on 2026-11-01 (single agent), pushed straight to `main` at the human's request. Plan: `C:\Users\muham\.claude\plans\plan-to-build-the-sequential-pearl.md`.
+  - `REPORT.md` (repo root, new): the full evaluation report in the README's style (Title Case, résumé voice,
+    Problem / Cause / Solution / Result), every number from `runs/`.
+  - `README.md` updated for Cycle 2 in the human's own structure and style (the human's PR #11 rewrite is the model;
+    the human said Claude's first README did not match their style).
+  - `datasheet-rag/runs/demo_script.md`: shot list; the human records the demo.
+  - The human makes the final charts and diagrams; Claude gave a figure brief and left Markdown tables and a Mermaid
+    diagram in place.
+  - Billing total $4.95 (read by the human on 2026-10-29), now in both files.
+  - The human's own edits (2026-10-29): `README.md` cut to a shorter version (Overview, Results, Architecture,
+    Tech Stack, Custom vs AWS Managed, Feedback Loop, Limitations, Future Work, Getting Started); both diagrams are
+    the human's images, `docs/architecture.png` (now with the feedback band) and `docs/Deployment.png` (replaces the
+    Mermaid block in both files; the README link was fixed to the file's capital D, since GitHub paths are
+    case-sensitive). `REPORT.md` shows both images.
+  - No demo GIF (the human's choice, 2026-11-01): the README header and the report's "Web Interface" section show
+    `docs/ui.png`, retaken on 2026-11-01 from the live site (one cached ask, about $0.0003). Teardown (step 11) is
+    next.
+- Plan change on 2026-10-23 (the human's decisions), replacing the 2026-10-22 order below:
+  - Step 8 builds the **whole** KB pipeline, start to finish, identical to our hosted one: the same page with a **toggle** (Ours / Knowledge Base) and the same way of asking; only the retrieval and generation path changes. Then both pipelines are tested on the 49 questions and the results saved. That is the clean comparison.
+  - Step 9 then adds two features to **both** pipelines, **upload first, then feedback**: 9a a user can upload a PDF, which is ingested, embedded and ready to ask about; 9b the human-approved feedback loop. 9c tests both pipelines again (the 49 for regressions, plus upload and correction cases).
+  - Before step 8, step 7b closes the Aurora cost risk with fixes 1 to 5 (see step 7 in Current status and step 7b in the Cycle 2 outline).
+- Plan change on 2026-10-22 (the human's decision): a human-approved feedback loop is added as Cycle 2 step 9, built **after** step 8's comparison is finished, so no correction can skew the comparison. 9a puts it on the Knowledge Base pipeline first; 9b then puts it on our pipeline too (planned, not optional). Source: the human's design PDF `feedback_driven_rag_aws_design.pdf` (repo root, gitignored), reviewed on 2026-10-22 (see `progress.md`, Session 20). Report and teardown moved to steps 10 and 11. Nothing about it is built or verified yet.
+- Plan change on 2026-10-16 (the human's decision): after the deployed evaluation, Cycle 2 builds a second RAG pipeline with Amazon Bedrock Knowledge Bases and an S3 Vectors store, and compares it with ours on the same 49 questions (Cycle 2 step 8). The steps after it moved down by one. Nothing about it is built or verified yet.
+- Cycle 2 step 1 (Aurora smoke test): DONE on 2026-10-16, single agent, merged as PR #12 (`faa47cb`). Results are in `runs/aurora_smoke.md`.
+  - Free plan facts, verified in the AWS docs on 2026-10-16:
+    - Aurora can be created only with **express configuration**: at most 4 ACU, 1 GB of storage and 2 clusters.
+    - An express cluster has **no VPC**. It is reached over the internet through the "internet access gateway" on port 5432.
+    - Login is **IAM-token only**: no master password and no Secrets Manager master secret.
+    - The engine version is AWS's default: it can be upgraded, never downgraded.
+    - The Data API can be turned on only with `aws rds enable-http-endpoint` (the console's Modify page has no setting for it), and it needs a separate password user whose password is kept in Secrets Manager.
+  - The cluster as built:
+    - `datasheet-rag`, us-east-1, Aurora PostgreSQL **17.9** with pgvector **0.8.1** (locally we stay on pg16).
+    - Capacity 0–4 ACU, pause after 5 minutes idle.
+    - Roles: `rag_app` (has `rds_iam`, for the direct way) and `rag_data` (password in secret `datasheet-rag/rag_data`, for the Data API).
+    - The dev IAM user has the inline policy `rag-aurora-smoke`: `rds-db:connect` for `rag_app`, `rds-data:ExecuteStatement`, `secretsmanager:GetSecretValue`.
+    - The `AURORA_*` identifiers are in `datasheet-rag\.env`. The account ID and the endpoint never go in the repo.
+  - Results:
+    - All of `rag/db.py` ran unchanged over the direct way (psycopg plus IAM token, `sslmode=require`).
+    - The Data API round-tripped 1024-number vectors.
+    - The cluster paused at 0 ACU.
+    - Resume to the first answer took 18.8 s by the direct way and 17.6 s through the Data API (retried on `DatabaseResumingException`).
+    - The local database is 134 MB, which fits the 1 GB limit.
+  - Files:
+    - `scripts/aurora_smoke.py` (`direct`, `resume`; the `data-api` command was removed in step 2);
+    - `rag/db.py` `server_info` (`DATA_API_SMOKE` was removed in step 2);
+    - the `AURORA_*` settings in `rag/config.py`.
+  - Lambda supports `python3.14` (AL2023, until 2029-06-30), so no downgrade is needed.
+  - TLS: connect with `sslmode=verify-full`. On Windows `sslrootcert=system` fails (OpenSSL's store is empty), so the script uses botocore's `cacert.pem`; choose the bundle for Lambda in step 2.
+  - Code review done and recorded (1 of 2): 8 of 10 findings fixed (certificate check, search_path SQL moved to `db.use_schema`, one Data API client, empty `AURORA_PORT`, and smaller ones). 862 tests pass.
+  - Recommendation for step 2 (to be decided in its plan): the **direct IAM-token connection** in `db.connect` instead of a Data API backend. After that the human deletes the secret, the `rag_data` role and the Data API endpoint.
+  - The cluster stays paused for steps 2 and 3.
+- Cycle 2 step 2 (data access layer): DONE on 2026-10-17 (single agent). Decision: **direct IAM-token connection, no Data API backend.**
+  - `config.DB_TARGET` (`local` by default, or `aurora`; set it in the shell, `.env` values lose to the environment) picks the database. `db.connect()` stays the only way in, so every caller works on both.
+  - The Aurora path, `db._connect_aurora()`:
+    - makes a fresh token with `generate_db_auth_token`;
+    - connects with `sslmode=verify-full` and `sslrootcert` = `AURORA_CA_BUNDLE` (empty means botocore's `cacert.pem`, which is in the Lambda runtime too);
+    - has a 60 s timeout and tries `AURORA_CONNECT_ATTEMPTS` (3) times, each with a new token.
+  - `boto3` is imported only on that path.
+  - Removed: `DATA_API_SMOKE`, the `data-api` smoke command, `AURORA_CLUSTER_ARN` and `AURORA_SECRET_ARN`.
+  - Tests: `tests/test_db_connect.py` (8, offline, fakes for psycopg and boto3). 867 tests pass locally.
+  - With `DB_TARGET=aurora`, `tests/test_db.py` and `tests/test_search.py` passed on Aurora: 184 tests in 216 s, each in its own throwaway schema. None were left behind, and `public` on Aurora is still empty for step 3.
+  - `scripts/aurora_smoke.py direct` passed through `db.connect()`.
+  - Code review done and recorded (1 of 2). 7 of 9 findings fixed: a 5 s pause between attempts (`AURORA_RETRY_PAUSE_S`), a warning logged per failed attempt, a cached RDS client, the connection closed if setting the schema fails, and a wider skip guard in `conftest.py`. 869 tests pass.
+  - The DB tests follow `DB_TARGET` on purpose, so a shell left with `DB_TARGET=aurora` runs them on Aurora.
+  - **For step 4:** the worst-case connect is 3 × 60 s, far past API Gateway's 29 s. The Lambda must use a shorter timeout and fewer attempts.
+  - Merged as PR #13 (`bc7d476`).
+  - Data API cleanup done by the human on 2026-10-17:
+    - endpoint disabled (`HttpEndpointEnabled: false`);
+    - role `rag_data` dropped;
+    - secret `datasheet-rag/rag_data` deleted;
+    - `rag-aurora-smoke` now holds only `rds-db:connect` for `rag_app`.
+  - Gotcha found while dropping the role: on Aurora, `postgres` is `rds_superuser`, not a superuser. In PG16+, `DROP OWNED BY` needs membership of the role, so run `GRANT <role> TO postgres;` first.
+  - `aurora_smoke.py direct` passed after the cleanup.
+- Cycle 2 step 3 (load the data into Aurora): DONE on 2026-10-17 (single agent), merged as PR #14 (`04b54cc`). Results are in `runs/aurora_load.md`. No Bedrock call was made.
+  - In Aurora: the 4 `documents`, the 797 `fixed_400_prefix` chunks (the frozen strategy only; the experiments stay local), and all 3,486 vectors of `embedding_cache` (so the load made no Titan call; the 49 question vectors are in it). `rerank_cache` was not copied, so step 7 measures real rerank latency and cost. Aurora's database is 38 MB.
+  - Checks: the loader's dry run said 0 paid calls; `show_db --strategy fixed_400_prefix` OK with 1024 dims; a second load kept 797; `scripts/compare_targets.py` gave the same 30 hybrid candidates for 49 of 49 questions on both databases.
+  - Files: `rag/db.py` (`connect(schema=None, target=None)`, where `target` overrides `DB_TARGET`; `embedding_rows`, `embedding_counts`, `database_size`), `rag/copy_cache.py` (`copy_embeddings`; `python -m rag.copy_cache [--run]` copies local to Aurora, only missing rows), `scripts/show_db.py` (`--strategy`, repeatable; prints cache counts and size), `scripts/compare_targets.py`, `tests/test_copy_cache.py`, 3 tests in `tests/test_db_connect.py`.
+  - End to end on Aurora (paid, $0.0023): q01 answered 35 V citing LM35 page 4; search 312 ms, rerank 1,315 ms, answer 690 ms.
+  - To reload Aurora from scratch: `python -m rag.copy_cache --run`, then with `DB_TARGET=aurora`, `python -m rag.load --strategy fixed_400_prefix --run`.
+- Cycle 2 step 4 (Lambda): DONE on 2026-10-17 (single agent), merged as PR #15 (`3802ca5`); results in `datasheet-rag/runs/lambda_deploy.md`. 905 tests pass.
+  - The function `datasheet-rag` (python3.14, x86_64, 512 MB, 60 s timeout) runs as role `datasheet-rag-lambda`. The dev user has the inline policy `rag-lambda-invoke` (invoke, read configuration, filter logs). The account's Lambda concurrency quota is 10, so no reserved concurrency is possible; step 5's throttling is the guard.
+  - Measured: a cold call with Aurora paused took 19.5 s (connect 17.9 s, init 0.96 s); warm 4.6 ms; a new question 1.05 s in the function. Cache writes from Lambda work. Spend $0.0026.
+  - After the code review (1 of 2, 7 of 10 fixed), each request opens and closes its own connection, because Aurora Serverless v2 does not pause while a user connection is open. `config.DEPLOYED` (Lambda's `AWS_LAMBDA_FUNCTION_NAME` is set) switches `rag/api.py` to neutral error messages and makes `costlog.log_cost` also print a `{"cost": ...}` line for CloudWatch. New settings: `BEDROCK_CONNECT_TIMEOUT_S`, `BEDROCK_READ_TIMEOUT_S` (Lambda 5 and 20). Pins for the zip come from `requirements.txt`. 911 tests pass. Re-tested after the re-upload: warm connect 48–178 ms; after 7 idle minutes the connect took 18.7 s, so Aurora pauses; the cost lines reach CloudWatch. Step 4 spend $0.0029.
+  - To redeploy: `python scripts\build_lambda.py`, then upload `build\lambda.zip` in the console and click Save (a first upload once did not save; check that the code size is about 22.7 MB).
+  - `handler.py` (`lambda_handler`; HTTP API 2.0 and REST 1.0 events; one warm connection; 503 when Aurora does not answer; one JSON log line per request), `scripts/build_lambda.py` (`build/lambda.zip`, Linux wheels, 22.7 MB), `scripts/invoke_lambda.py` (`documents` free, `ask` needs `--yes`), `tests/test_handler.py`.
+  - Settings Lambda sets in its environment (defaults unchanged locally): `RAG_RUNS_DIR=/tmp/runs`, `BEDROCK_MAX_ATTEMPTS=2` (new setting), `RERANK_MIN_INTERVAL_S=0`, `AURORA_CONNECT_ATTEMPTS=1`, `AURORA_CONNECT_TIMEOUT_S=22`.
+  - Verified: psycopg-binary 3.3.6 has a cp314 manylinux wheel, so the runtime is `python3.14`; the zip ran in `public.ecr.aws/lambda/python:3.14` against the local database.
+  - Decisions: the dev user gets `lambda:InvokeFunction` on this function (Claude runs the deployed tests); the deployed function writes to the Aurora caches.
+- Cycle 2 step 5 (API Gateway): BUILT and TESTED on 2026-10-17 (single agent), merged as PR #16 (`e0ac474`); console steps, results and findings in `datasheet-rag/runs/api_gateway.md`. Spend $0.0023. Code review done and recorded (1 of 2), 4 of 8 fixed; 924 tests pass.
+  - Decisions: HTTP API `datasheet-rag-api` (payload 2.0, `$default` stage, routes `POST /api/ask` and `GET /api/documents` only). Throttling: `/api/ask` rate 0.05, burst 3 (the Rerank quota, reranker stays on); `/api/documents` and the stage default rate 1, burst 5. CORS origin `http://localhost:8000` until step 6. Access logs to `datasheet-rag-api-access`.
+  - Verified in the AWS docs on 2026-10-17: HTTP API throttling is per stage and route, and the rate is a decimal; the integration timeout is at most 30 s and fixed; HTTP APIs have no usage plans or quotas; AWS says REST usage-plan quotas must not be relied on to control costs; with CORS set, API Gateway answers `OPTIONS` and ignores the backend's CORS headers.
+  - Daily cap in our code: table `api_usage (day, asks)`, `db.take_daily_ask(conn, limit, day=None)` (one atomic upsert, None at the limit), `db.daily_asks`. `api.ask` counts only a request that passed every check, and answers 429 `api.DAILY_LIMIT` at the cap. `config.API_DAILY_ASK_LIMIT` from the environment: 0 (off) locally, 300 in Lambda. `api_usage` already exists on Aurora.
+  - `scripts/call_api.py` (`documents`, `ask --yes`, `cors`, `limits`, `throttle`, `usage`) calls the API at `API_URL` from `datasheet-rag\.env`. 921 tests pass.
+  - Measured: the `/api/ask` throttle (0.05/s, burst 3) is loose, 20 of 28 requests got through in 60 s, because API Gateway's hosts count separately. The human accepted it as best effort, so the daily cap is the exact spend guard. The console cannot create per-route throttles; they were set with `aws apigatewayv2 update-stage --route-settings` in CloudShell (one line). Two of 12 simultaneous requests got a 503 from API Gateway with no Lambda log line, most likely the 10-run concurrency limit (not confirmed).
+  - A Bedrock throttle gives the cap's place back (`db.release_daily_ask`); the daily-limit 429 body has `"limit": "daily"`.
+  - Left for step 6: the page's `fetch` and PDF links, the real CORS origin, and showing API Gateway's own error bodies (`{"message": ...}`, no `error` field).
+- Cycle 2 step 6 (Frontend): DONE on 2026-10-18 (single agent), merged as PR #17 (`a811170`).
+  - Results are in `datasheet-rag/runs/frontend_deploy.md`. The distribution `datasheet-rag-web` is on pay-as-you-go with WAF off. `SITE_URL` is in `.env`.
+  - The free checks passed through CloudFront, and so did one paid ask ($0.0003). The human checked in a browser that "Open page" opens the vendor PDF.
+  - Code review done and recorded (1 of 2), 5 of 8 fixed. Deployed (`config.DEPLOYED`), `_pdf_url` never gives a local copy. 722 tests pass without Docker.
+  - After the review (the human's choice): the four datasheets are written into `web/index.html` as `<option>`s, so loading the page never calls `/api/documents` or wakes Aurora. `tests/test_page.py` keeps them equal to `config.DOCUMENTS`. 932 tests pass.
+  - The Toshiba `docget.jsp` link opens in the browser at `#page=N` (checked by the human).
+  - The option A page is live: the served `index.html` is byte for byte the local file (checked 2026-10-18). Ready for the human's PR. Step 6 spend $0.0003.
+  - Decisions (the human, 2026-10-18):
+    - **CloudFront with a private S3 bucket (OAC)**, not the S3 website endpoint, which is HTTP only and public only.
+    - **Same origin**: CloudFront's behavior `/api/*` goes to API Gateway (`CachingDisabled`, `AllViewerExceptHostHeader`), so the page keeps `fetch("/api/...")`. CORS on the API is cleared.
+    - **No PDFs in S3.** TI and Toshiba forbid reproduction in the datasheets' own text. "Open page" links to the vendor's copy.
+    - The human uploads in the console.
+  - Verified in the AWS docs on 2026-10-18: S3 website endpoints have no HTTPS; OAC needs a regular bucket endpoint, "Sign requests", and a bucket policy with `AWS:SourceArn`; the CloudFront flat-rate Free plan is $0 with no overage charges (1 M requests, 100 GB a month, 1 distribution, 5 cache behaviors).
+  - Vendor links: `config.DOCUMENTS[...]["url"]`. `api._pdf_url(name, file)` returns `/pdfs/<file>` when the PDF is on disk, then the vendor URL, then None. `rag/server.py` puts only `/pdfs/` paths on its allow-list.
+    - ESP32 and LM35 vendor files have the same SHA-256 as ours.
+    - ST and Toshiba refuse scripted downloads, so the human checks them in a browser (guide step 0).
+    - These vendor URLs serve the newest revision, so the page numbers can move if a vendor publishes a new one.
+  - `web/index.html`: reads API Gateway's `{"message"}` bodies; a daily-limit 429 has no retry button; a 5xx or a body that is not JSON (CloudFront's HTML error pages) gives a "busy or waking up" message; the datasheet list shows "Loading datasheets…".
+  - `scripts/call_api.py --base site` sends every command to `SITE_URL` (in `.env`), and the new command `page` checks the page and the http→https redirect.
+  - 721 tests pass without Docker (207 skipped). `build/lambda.zip` rebuilt (22,687,005 bytes).
+- Cycle 2 step 7 (Deployed evaluation): DONE on 2026-10-18 (single agent), merged as PR #18 (`d41d176`). Results are in `datasheet-rag/runs/deployed_eval.md` and `runs/results_deployed.csv`; per-question rows are in `runs/deployed/` (`first.csv`, `cached.csv`, `cold.csv`).
+  - `rag/eval/deployed_eval.py`, run as `python -m rag.eval.deployed_eval`. Commands:
+    - `plan`: free, but it wakes Aurora;
+    - `run --pass first|cached`: paid; it prints the plan and needs `--yes` or a yes;
+    - `cold --trials --idle-minutes`;
+    - `logs`: CloudWatch with the dev user's `logs:FilterLogEvents`, matched to rows by time and checked by equal `timings_ms`;
+    - `summary [--aurora-acu-hours]`.
+  - Requests go through `SITE_URL`, 21 s apart. 429, 503, 504 and no answer are retried after 60 s, up to 3 times; the daily-limit 429 stops the run; rows are appended as answers arrive, and a re-run resumes.
+  - Tests: `tests/test_deployed_eval.py` (47, offline). 979 tests pass. Code review done and recorded (1 of 2), 8 of 10 fixed.
+  - Settings: `DEPLOYED_*`, `LAMBDA_FUNCTION`, `LAMBDA_MEMORY_MB`, and the prices checked on 2026-10-18: `LAMBDA_USD_PER_GB_S` 0.0000166667, `LAMBDA_USD_PER_REQUEST` $0.20 per 1M, `HTTP_API_USD_PER_REQUEST` $1.00 per 1M, `AURORA_USD_PER_ACU_HOUR` 0.12 (Standard; express configuration is not priced separately).
+  - Results:
+    - 101 asks, all 200, no retries. Spend **$0.1211**: first $0.1071, cached $0.0131, cold $0.0009.
+    - Citation hit 0.930 first and 0.953 cached (local 0.930). The same 2 false refusals (q24, q33). Unanswerable refused 6 of 6 (local 5 of 6, the q44 rewording; 6 of 6 after the 2026-10-24 re-score).
+    - Nova Lite is not repeatable at temperature 0: two passes with the same rerank scores differ on q25 and q30.
+  - Latency:
+    - client p50 1.09 s for a new question (real rerank 259 ms) and 0.83 s for a cached one;
+    - cold, with Aurora paused and Lambda recycled: 21.1–21.7 s (resume 17.3–18.1 s, init about 1.2 s), under API Gateway's 30 s;
+    - about 180 ms outside Lambda.
+  - Cost per query: Bedrock $0.00219 for a new question and $0.00027 for a cached one; Lambda $0.000009 warm and $0.00017 cold (billed while it waits for Aurora); HTTP API $0.000001.
+  - Aurora: 1.619 ACU-hours over 15:00–17:00 UTC (read by the human in CloudWatch, `ServerlessDatabaseCapacity`, Average, 1 hour), so $0.194, or $0.0019 per ask. At demo traffic that is about as much as Bedrock: the cost follows the wake-ups (at least 5 minutes awake each), not the number of questions.
+  - Total per question: $0.0041 new, $0.0022 cached.
+  - Open: an optional long-idle cold trial (after a night idle: `cold --trials 1 --idle-minutes 0 --yes`, then `logs`, `summary --aurora-acu-hours 1.6186`).
+  - Gotcha: CloudWatch lines can take more than a minute to appear, so run `logs` a few minutes after the last call.
+  - **COST RISK, CLOSED by step 7b on 2026-10-23 (see above and `runs/cost_fix.md`).** As found on 2026-10-18: anyone can keep Aurora awake, and the daily cap does not stop it.
+    - Why: every `/api/ask` and `/api/documents` request connects to Aurora. `handler.py` connects before `api.ask` checks the question, so even an empty question wakes it. The daily cap itself is counted in Aurora (`api_usage`), so a request over the cap still wakes Aurora to find that out.
+    - Bound: about $1.50–3 a day realistically (0.5–1 ACU kept awake, API Gateway throttling about 1 request a second), $11.52 a day at most (the express cluster's 4 ACU limit), plus about $0.70 a day of capped questions. Budget alerts only warn; nothing stops it automatically.
+    - Options discussed:
+      - check the question before connecting (stops empty-question wake-ups only);
+      - remove the `GET /api/documents` route (the page no longer calls it);
+      - keep the daily counter outside Aurora (closes it; a bigger change);
+      - pause the demo when not showing it: route throttles to 0 (VERIFY that an HTTP API accepts 0 and answers 429), or delete the `$default` stage (stops everything, but loses the throttling and access-log settings);
+      - tear down after the report.
+    - The human decides in the next session.
+- The four datasheets are the final set. The human is on the bypass list of the `main` ruleset, so direct pushes of small changes work.
+- Done by the human already: four datasheet PDFs gathered, AWS Budget alerts set, AWS account created in early October 2026 on the Free plan.
+
+## Environment notes
+
+- The human works on Windows with PowerShell. Use PowerShell-compatible commands. Activate the virtual environment with `.venv\Scripts\Activate.ps1`.
+- The project path contains spaces. Quote paths in commands.
+- Python 3.14.6 is installed and works for the Layer 0 packages. Before Cycle 2, check which Python versions Lambda supports (VERIFY). If Lambda does not support 3.14, build the Lambda package with a supported version, and keep the local code compatible with it.
+- Never write the database password or AWS keys into any file in the repo, into `CLAUDE.md`, or into a chat message. Read the local database password from an environment variable or a `.env` file listed in `.gitignore`.
+- Never create IAM users, access keys, or other credentials on the human's behalf. Tell the human what to create in the console, and what permissions it needs.
+
+## Rules for working in this repo
+
+- Do not start building a layer until the human says to build it. Each layer starts in plan mode; build only after the human approves the plan. Finishing one layer is not permission to start the next.
+- When a build runs into an issue, explain it in simple language: what the issue is, why it is happening, and how to fix it.
+- Teach what was built (the human, 2026-10-23): after each feature, layer or step is built, walk the human through its code step by step, in detail and in simple language: what each file and function does, how the flow runs, why each decision was made, and how each AWS service involved works. The goal is that the human can explain and defend the work to employers. Console guides in `.md` files stay short (only the steps to do). After the console work is checked and works, Claude explains in the chat what was done and why: what each resource and setting is, how it works, and how it fits the rest of the project (the human, 2026-10-23).
+- Two catch-up walkthrough sessions are planned, at the human's request, because the built parts were never walked through: (1) Cycle 1 in depth, run locally: the flow from start to finish, each layer, its files and functions and where they are, and the decisions; (2) Cycle 2 steps 1 to 7: each step's code, console setup and AWS services. Step 7b was walked through when it finished (2026-10-23). From then on, walkthroughs happen as each step is built, not as full sessions.
+- Git, as set by the human on 2026-10-12. Layer builds: the human does the branch, commits, PR and merge; Claude says when the work is ready and lists the changed files. Small changes (edits to `.md` files, small fixes, tooling tweaks): Claude commits and pushes them straight to `main` with no PR, but only after telling the human what it wants to commit and getting a yes (added by the human on 2026-10-13; every commit needs its own yes). Before the commit, check `git status` for anything that must not be committed. If it is unclear whether a change is small, ask. The GitHub workflow also runs on a push to `main` unless the push only touches Markdown files. A commit that touches only `CLAUDE.md` and/or `progress.md` skips the tests (the human, 2026-10-23: they waste time): run the secret scan by hand, then `git commit --no-verify`, and push straight to `main` (the yes is still asked).
+- Hooks (added 2026-10-12):
+  - `.githooks/pre-commit` runs `tools/checks.py --staged` before every commit: secret scan, `ruff`, `pytest`. A failure stops the commit. Enabled per clone with `git config core.hooksPath .githooks`. Needs `ruff` in the venv (`pip install ruff`).
+  - `.claude/settings.json` has a Stop hook (`tools/review_gate.py`). When code has changed it runs the same checks and sends Claude back to fix failures. When they pass and the layer has not been reviewed, it asks for the code review.
+  - Code review rule (set by the human on 2026-10-12): one review per layer, with the built-in code-review skill, when the layer is finished and before the PR. Claude runs it without being asked; the human never has to call it. Small changes outside a layer build are not reviewed: when the hook asks about one, say it is not a layer and carry on. Record it with `python tools/review_gate.py --reviewed`. After fixing review findings, re-run the checks only. Run a second review only if a fix rewrote logic substantially, and never more than two per layer. The hook counts a layer as everything since the branch left `main`; `python tools/review_gate.py --status` shows the count.
+  - `.github/workflows/tests.yml` runs ruff and pytest on every pull request into `main` and on pushes to `main` that touch more than Markdown. It is pinned to `ubuntu-24.04`, `actions/checkout@v6` and `actions/setup-python@v6` (v7 of both exists; not adopted because its changes were not checked). GitHub has no AWS credentials, database or datasheet PDFs, so a test that needs one must skip itself there. `pytest.ini` limits collection to `tests/`; never put a paid call in a file pytest can collect.
+  - A second Stop hook (`tools/progress_gate.py`, added 2026-10-12) keeps `progress.md` current. When files have changed and the log has no entry dated today, or a file changed after the log was last saved, it sends Claude back to write or update today's entry. It cannot see a session where no file changed, so log decisions made in discussion by hand.
+- Build one layer at a time, in order. Do not start a layer until the previous layer's test passes.
+- Keep the pipeline steps as separate small functions in separate modules. The entry point (local server in Cycle 1, Lambda handler in Cycle 2) only calls them in order.
+- Keep all SQL in `rag/db.py`. Nothing else writes SQL strings.
+- Never put secrets in code, in the repo, or in the frontend. No AWS keys in Git. Add `.env` and `.aws/` to `.gitignore` first.
+- Every claim about an AWS price, limit, API field, or model ID that is marked VERIFY must be checked against the current AWS documentation or console before it is relied on.
+- Keep `progress.md` (repo root) up to date. At the end of every session, add a dated entry at the top of the log: what was done, decisions, problems, what is still open. Update the human's checklist in the same file.
+- Keep a cost log. Every Bedrock call records its token or query count to `runs/cost_log.csv`.
+- Do not run any evaluation loop that calls a paid model until the number of calls and the estimated cost are printed and confirmed.
+
+## Parallel layer builds (set by the human on 2026-10-13)
+
+A layer that splits well is built by several agents at the same time, with Claude as the lead. This is a standing request from the human to use subagents for those layers. It was tried on Layer 2 and kept for Layers 4 and 7. When planning a parallel layer, try the contract's rules on real data before the agents start.
+
+Which layers split:
+
+| Layer | Build | Split |
+|---|---|---|
+| 2 chunking | Parallel | text strategies; table chunking; test writer |
+| 3 embeddings and storage | Single | Small, tightly linked, and it makes paid calls |
+| 4 retrieval | Parallel | database search functions (SQL in `rag/db.py`); pure functions (`rrf`, tsquery builder, `detect_part`); test writer |
+| 5 reranking | Single | One small module around one paid call |
+| 6 generation and citations | Single | One small module; the functions depend on each other |
+| 7 evaluation | Parallel | `metrics.py`; `run_eval.py`; test writer. The questions are written by the human and Claude together |
+| 8 wrap-up | Single | Decisions and a summary, no parallel work |
+| Cycle 2 steps | Single by default | Mostly console and deployment work in a fixed order. Decide in each step's plan |
+
+The table is the default. The layer's plan may change it with a reason (for example, a layer turns out smaller than expected).
+
+How a parallel build runs:
+
+1. Plan, in plan mode. The plan has a "Work split" section with: the contract (shared data shapes, function names and signatures); each agent's job and done test; file ownership, with no file given to two agents. A single-agent layer says so in one line instead.
+2. Build. After the human approves the plan, the lead starts the agents together: `layer-builder` for each code piece and one `test-writer` (definitions in `.claude/agents/`). Each prompt carries the contract, the job, the owned files and the done test in full, because an agent starts with no memory of the conversation.
+3. Integrate. The lead reads every agent's report and the code, joins the pieces, makes the changes agents may not make (`rag/config.py`, shared files), runs the full checks (`tools/checks.py`) and fixes what does not fit. A test that fails is fixed in the code unless the test contradicts the contract.
+4. Review and hand over. One code review of the whole layer with the built-in code-review skill, as in the code review rule above. Then the lead updates `CLAUDE.md` and `progress.md` and tells the human the layer is ready, with the list of changed files.
+
+Rules for the agents (also written into each definition):
+
+- An agent changes only the files it owns. It reports problems in other files and does not fix them.
+- Agents work in the normal project folder on separate files, not in git worktrees: the parsed datasheets, the PDFs and the venv are not in git, so a worktree would not have them.
+- Agents never run a git command that changes anything. Commits, branches and pushes stay as in the Git rule.
+- Agents never make a paid or cloud call. Only the lead does, after the cost is printed and confirmed.
+- Agents never edit `CLAUDE.md`, `progress.md`, `rag/config.py`, or anything under `.claude/`, `.githooks/`, `.github/` or `tools/`.
+- The test writer works from the contract and does not read the new code. Builders do not edit tests.
+- An agent that finds the contract wrong stops and reports it. Only the lead changes the contract, and tells the human when it does.
+
+## Settled design decisions
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Region | us-east-1 (N. Virginia) | In-region for Titan Embeddings V2, Cohere Rerank 3.5, Nova Lite. Data location does not matter. |
+| Embedding model | Amazon Titan Text Embeddings V2, 1024 dimensions, same model in both cycles | Cheapest option found, 8,192 token input, one `vector(1024)` column, no re-embedding when moving to AWS. |
+| Reranker | Cohere Rerank 3.5 on Bedrock | Available in us-east-1. About $2 per 1,000 queries; one query covers up to 100 chunks. |
+| Answer LLM | Amazon Nova Lite (in-region, no cross-Region profile needed) | Low cost, works inside the Free plan limits. Claude Haiku 5.5 is an optional comparison only if the account allows cross-Region inference profiles (VERIFY). |
+| RAGAS judge LLM | Amazon Nova Pro (in-region in us-east-1) as the default. Check price first. | A stronger model than the generator. VERIFY price before any RAGAS run. |
+| Database, Cycle 1 | Postgres with pgvector in Docker on the local machine | Free. |
+| Database, Cycle 2 | Aurora PostgreSQL Serverless v2 (express configuration), minimum capacity 0 ACU (auto-pause), reached directly with psycopg and an IAM token (changed from the Data API at step 2, 2026-10-17) | No compute cost when paused. An express cluster has no VPC, so Lambda connects over the internet gateway without NAT or VPC endpoint charges, and `rag/db.py` runs unchanged. Fallback: RDS PostgreSQL db.t4g.micro (always on, about $12 per month). |
+| Page number stored | PDF page position (1-based index in the file) as `page`. Printed label stored separately as `page_label` when parsable. | A user can open the PDF at that page. Citations use `page`. |
+| Section headings | Stored best effort in `section`. Prepending document name and section to the embedded text is an experiment (on vs off). | Gives a chunk context. Measured, not assumed. |
+| Keyword search | Postgres full-text search with an OR-joined tsquery built by our own function. Test the `english` and `simple` configurations. | `plainto_tsquery` requires every word to match, so long questions return nothing. English stemming may damage part numbers. |
+| Datasheet filter | No automatic detection in the baseline. Cycle 2 UI has a datasheet dropdown (default: all). `detect_part` is an experiment. | A wrong filter hides the right answer. |
+| Vector index | None in Cycle 1 (exact search). HNSW is an experiment that measures index recall. Cycle 2 uses exact search. | A few thousand chunks do not need an index. |
+| recall@k definition | Hit rate: for each question, 1 if at least one correct chunk is in the top k, else 0, averaged over questions. A question may list several acceptable (doc, page) pairs. | Defined once, used everywhere. MRR is reported alongside. |
+| Candidates and k | Hybrid search returns N = 30. Reranker keeps k = 10 (frozen at Layer 8; k 5 was the start value). | k 10 cut false refusals from 6 to 2 (Layer 7). |
+| Frontend | One static HTML page with `fetch` (`datasheet-rag/web/index.html`), served by `rag/server.py` locally in Cycle 1 and from S3 in Cycle 2 | No framework or build step. Built in Layer 8b. |
+| Managed comparison | A second pipeline on a Bedrock Managed Knowledge Base (AWS's parser, chunking, embedder, hybrid search and reranker; `Retrieve` feeds our `generate()`), served from the same page through a toggle (Ours / Knowledge Base), and judged with the same questions and metrics (Cycle 2 step 8). | Answers "build your own RAG pipeline or let AWS handle it", with the answer step identical. Decided by the human on 2026-10-16; full pipeline and toggle on 2026-10-23; Managed KB instead of S3 Vectors on 2026-10-23. |
+| PDF upload | A user uploads a PDF, which is ingested in the background and can then be asked about; on both pipelines, after the step 8 comparison (Cycle 2 step 9a). | Added by the human on 2026-10-23. Built after the comparison so it cannot skew it. |
+| Feedback loop | Human-approved corrections, after the step 8 comparison is final and after upload: on both pipelines (step 9b). | Corrections added before or during the comparison would skew it. Decided by the human on 2026-10-22; order and scope changed on 2026-10-23. |
+| Public demo | Throttled API Gateway plus Lambda concurrency cap. Torn down after publishing. A recorded demo and the repo stay as the portfolio artifact. | A public URL is the main spending risk. |
+
+## Architecture
+
+Ingest (run once per datasheet set, ahead of time):
+
+1. Datasheet PDFs are read page by page. Text and tables are extracted.
+2. Text is cleaned and split into chunks. Each chunk keeps document, page, section, and kind (text or table).
+3. Each chunk is embedded with Titan V2 (1024 numbers).
+4. Chunks, metadata, and vectors are stored in Postgres.
+
+Query (every question):
+
+1. The question is embedded with the same model.
+2. Vector search and keyword search each return the top N chunks.
+3. Reciprocal Rank Fusion merges the two lists.
+4. The reranker scores each (question, chunk) pair. The top k are kept.
+5. A prompt is built: rules, numbered passages, question. Nova Lite answers using only the passages and cites `[n]`.
+6. Our code maps `[n]` back to document and page from stored data, and flags any invalid label.
+7. The response (answer and sources) is returned.
+
+Cycle 1 runs everything locally behind a script and a small local server. Cycle 2 moves the same functions behind API Gateway and Lambda, with Aurora as the database and S3 as the host for the page and the PDFs.
+
+## Repo layout
+
+```
+rag/
+  config.py        # region, model IDs, N, k, chunking settings
+  db.py            # all SQL; psycopg, two targets (local Docker, Aurora with IAM token), DB_TARGET picks
+  parse.py         # PDF -> pages, text, tables
+  chunk.py         # chunking strategies
+  embed.py         # Titan V2 calls
+  search.py        # vector_search, keyword_search, rrf, optional filter
+  rerank.py        # Cohere Rerank 3.5 call
+  generate.py      # build_prompt, call_llm, resolve_citations
+  pipeline.py      # answer_question(question) calling the steps in order
+  api.py           # the web page's JSON API without HTTP (Layer 8b)
+  server.py        # local HTTP server for web/index.html, the API and the PDFs (Layer 8b)
+  eval/
+    metrics.py     # recall_at_k, mrr
+    run_eval.py    # runs a strategy over the question set, logs metrics, latency, cost
+    ragas_run.py   # RAGAS on shortlisted strategies only
+data/
+  pdfs/            # datasheets (4 or 5)
+  questions.jsonl  # ~40 hand-built questions with answers and sources
+runs/              # eval outputs and cost_log.csv
+tests/
+handler.py         # Cycle 2 Lambda entry point
+web/index.html     # the frontend: served locally (Layer 8b), from S3 in Cycle 2
+```
+
+## Cycle 1: build the pipeline and the evaluation locally (full detail)
+
+### Layer 0: setup and guardrails
+
+Do:
+- Create a Python virtual environment. Install: `pdfplumber`, `psycopg[binary]`, `boto3`, `pytest`, `numpy`, plus RAGAS later (check current install name and version).
+- Postgres with pgvector in Docker is already running (see Current status). Command used, for reference or to recreate it, with the password set locally and never committed: `docker run -d --name rag-pg -e POSTGRES_PASSWORD=<local password> -p 5432:5432 -v rag_pgdata:/var/lib/postgresql/data pgvector/pgvector:pg16`. Use `pg16` to stay close to Aurora's Postgres 16 line. Do not switch to a pg18 tag without checking the data path and the Aurora version.
+- Set an AWS Budget with email alerts at small amounts before any Bedrock call.
+- Create one IAM user for local development with only the permissions needed to call the specific Bedrock models (VERIFY action names, such as invoking models and reranking). Keep its access key in the local AWS credentials file, never in the repo. Delete it at teardown. (The new account experience may not support IAM Identity Center. VERIFY.)
+- In the Bedrock console, request access to the models if required (VERIFY).
+
+Test:
+- `psql` connects to the local database and `CREATE EXTENSION IF NOT EXISTS vector;` succeeds.
+- A script embeds one sentence with Titan V2 and prints `len(vector)`. It must print 1024.
+- The cost log file receives one row.
+
+### Layer 1: PDF parsing
+
+Do:
+- Extract text per page and tables per page with pdfplumber. Keep the PDF page position with everything extracted.
+- Strip repeated headers and footers (text that repeats on most pages).
+- Save the parsed result to `runs/parsed/<doc>.json` so later layers do not re-parse.
+
+Test:
+- `pytest tests/test_parse.py` checks: page count equals the PDF's page count; every extracted item has a page number; no page is empty unless it is blank in the PDF.
+- Manual check, recorded in `runs/parse_review.md`: for each datasheet, open at least 3 table pages beside the parsed output. Confirm column headers stay with their values and that symbols (Ω, µ, ±, subscripts) are correct.
+- If a datasheet is scanned (text cannot be selected), stop and decide on OCR. Do not continue silently.
+
+### Layer 2: chunking
+
+Do:
+- Implement strategies as separate functions with the same output format: a list of chunks, each with `document`, `page`, `section` (optional), `kind` (text or table), `text`.
+  - `page_based`
+  - `fixed(size, overlap)` for 256 and 400 tokens, with and without overlap
+  - `structure_aware` (split at headings and paragraphs)
+  - `fixed_1024` as the large-chunk comparison
+- Tables: keep a table whole in one chunk if it fits. If it must be split, repeat the header row in every piece. Convert rows to row-as-sentence text ("Parameter: VDD, Min: 3.0, Typ: 3.3, Max: 3.6, Unit: V"). Store the table caption with it.
+- Count size in an approximate token measure (for example characters divided by 4, or words times 1.3). Record which measure is used.
+- Chunks sent to the reranker must stay at or below about 400 tokens including the question. Longer text is truncated for reranking only, or the strategy is marked as rerank-limited.
+
+Test:
+- `pytest tests/test_chunk.py` checks: every chunk has document and page; no chunk exceeds its size limit; overlap chunks share the expected text; every table chunk starts with or contains its header labels; chunk page numbers match the source page.
+- Print chunk counts per strategy per document and keep them in `runs/chunk_counts.csv`.
+
+### Layer 3: embeddings and storage
+
+Do:
+- Create the tables `documents` and `chunks` in `rag/db.py` (see Schema). One `strategy` column on `chunks` lets several chunking strategies live in the same table for comparison.
+- Embed chunks in batches with Titan V2 (1024 dimensions; check the `normalize` setting in the API docs). Log tokens to the cost log.
+- Make the load idempotent: re-running for the same document and strategy replaces the old rows.
+
+Test:
+- `SELECT count(*) FROM chunks WHERE strategy = '<s>'` equals the number of chunks produced by Layer 2.
+- `SELECT vector_dims(embedding) FROM chunks LIMIT 1` returns 1024.
+- Re-run the load. The count must not change.
+- The cost log shows the token total, and the estimated cost is printed.
+
+### Layer 4: retrieval
+
+Do:
+- `vector_search(question_vec, n)` using `ORDER BY embedding <=> %s::vector LIMIT n`. Keep the raw `<=>` in `ORDER BY`.
+- `keyword_search(question, n)` using a generated `tsv` column, a GIN index, and an OR-joined tsquery built by our own function from the question's words. Keep exact tokens such as part numbers and values. Compare `english` and `simple` configurations.
+- `rrf(ranked_lists, c=60)` over chunk ids.
+- Optional `detect_part` and metadata filter, switchable by config (experiment, default off).
+
+Test:
+- `pytest tests/test_search.py` with a tiny fixture set: RRF on known lists returns the known order; a question with an exact part number returns the chunk containing it in the keyword top 3; a long natural question returns at least one keyword result.
+- `EXPLAIN` on the vector query shows the cosine distance operator in the sort.
+- Print vector-only, keyword-only, and hybrid top 5 for five hand-picked questions and review by eye.
+
+### Layer 5: reranking
+
+Do:
+- `rerank(question, candidates, k)` calling Cohere Rerank 3.5 on Bedrock (VERIFY the API name and request fields). Send at most 100 documents per call. Log query units to the cost log.
+- Make the reranker switchable on and off by config.
+
+Test:
+- A fixture with two chunks: "Each GPIO pin can source at most 40 mA." and "The total current for all GPIO pins together must not exceed 1,200 mA." For the question "What is the maximum current per GPIO pin?", the per-pin chunk must score higher. (Use the real numbers from a real datasheet once available.)
+- A call with 101 candidates is split into two calls.
+- Output has exactly k items, sorted by score.
+
+### Layer 6: generation and citations
+
+Do:
+- `build_context(chunks)` numbers passages from 1 and labels each with document and page.
+- `build_prompt` / system prompt rules: answer only from the numbered passages; cite `[n]` after each claim; if the passages do not contain the answer, say the provided datasheets do not contain it; do not use outside knowledge; if passages conflict, say so.
+- `call_llm` calls Nova Lite through the Bedrock Converse API with the rules in the system field (VERIFY request format). Set a maximum output length. Log tokens.
+- `resolve_citations(answer, chunks)` maps `[n]` to `chunks[n - 1]` and returns the sources plus any invalid labels.
+
+Test:
+- `pytest tests/test_generate.py`: labels start at 1; `resolve_citations` maps `[2]` to the second chunk; `[250]` is reported invalid; duplicate labels produce one source.
+- Run 3 answerable and 3 unanswerable questions. Unanswerable ones must produce a "not contained" answer. Record the results in `runs/generation_smoke.md`.
+
+### Layer 7: evaluation
+
+Do:
+- Build `data/questions.jsonl` by hand, about 40 questions. Each has: `question`, `expected_answer`, `sources` (a list of acceptable `[document, page]` pairs), and `type` (single value, table lookup, comparison, rephrased wording, no answer exists). Read the datasheets yourself so the answers are known to be right. Include exact-value questions, table lookups, questions phrased differently from the datasheet, and about 5 unanswerable questions.
+- `metrics.py`: `recall_at_k(results, truths, k)` and `mrr(results, truths)`.
+- `run_eval.py <strategy-config>`: runs all questions through one strategy and writes per-question results and a summary row: recall@k, MRR, latency by stage (embed, search, rerank, generate), and cost per query.
+- Strategies to compare (change one thing at a time, same questions): chunking (page, fixed 256, fixed 400 with and without overlap, structure-aware, fixed 1024), retrieval (vector only, keyword only, hybrid), reranker (on or off), k (3, 5, 10), keyword configuration (`english` vs `simple`), header prefix (on or off), datasheet filter (on or off), HNSW index (on or off; measure index recall against exact search).
+- Retrieval metrics need no LLM and run on every strategy. Run RAGAS (faithfulness and response relevancy, plus context metrics if useful) only on the best 3 or 4 strategies. Check the current RAGAS documentation for metric names and judge-model setup. Spot-check a sample of judge scores by hand.
+- Do not tune chunking to individual test questions.
+
+Test:
+- `pytest tests/test_metrics.py` on toy data with known answers. Include this case: two strategies with the same recall@5 and different MRR (correct chunk at rank 1 versus rank 5).
+- A dry run prints the number of paid calls and the estimated cost before any real run.
+- The baseline run produces `runs/results.csv` with one row per strategy and all required columns.
+
+### Layer 8: Cycle 1 wrap-up
+
+Do:
+- Pick the best strategy per the results. Record the decision and the numbers in `runs/cycle1_summary.md`.
+- Freeze the question set and the chosen configuration in `rag/config.py`.
+
+Test:
+- `python -m rag.pipeline "<question>"` prints an answer with document and page citations for three real questions.
+
+## Schema (as built in Layer 3; the source is `_TABLES` in `rag/db.py`)
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+
+CREATE TABLE documents (
+    id       SERIAL PRIMARY KEY,
+    name     TEXT NOT NULL UNIQUE,       -- parsed name, e.g. lm35
+    file     TEXT,                       -- PDF file name
+    part     TEXT,
+    revision TEXT
+);
+
+CREATE TABLE chunks (
+    id          SERIAL PRIMARY KEY,
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    strategy    TEXT NOT NULL,           -- which chunking strategy produced it
+    chunk_index INTEGER NOT NULL,        -- order within the document and strategy
+    page        INTEGER NOT NULL,        -- PDF page position, used for citations
+    page_label  TEXT,                    -- printed page label, if known
+    section     TEXT,
+    kind        TEXT NOT NULL,           -- 'text' or 'table'
+    text        TEXT NOT NULL,
+    embedding   vector(1024) NOT NULL,
+    tsv_english tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
+    tsv_simple  tsvector GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED,
+    UNIQUE (document_id, strategy, chunk_index)
+);
+
+CREATE INDEX chunks_strategy_idx ON chunks (strategy);
+CREATE INDEX chunks_tsv_english_idx ON chunks USING GIN (tsv_english);
+CREATE INDEX chunks_tsv_simple_idx ON chunks USING GIN (tsv_simple);
+
+-- Every vector that was paid for, keyed by the SHA-256 of the embedded text and the model setup.
+CREATE TABLE embedding_cache (
+    text_sha256 TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    embedding   vector(1024) NOT NULL,
+    PRIMARY KEY (text_sha256, model)
+);
+
+-- Every rerank score that was paid for (Layer 5), keyed by the hashes of the question and of the text sent.
+CREATE TABLE rerank_cache (
+    question_sha256 TEXT NOT NULL,
+    text_sha256     TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    score           DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (question_sha256, text_sha256, model)
+);
+-- Experiment only: CREATE INDEX chunks_emb_idx ON chunks USING hnsw (embedding vector_cosine_ops);
+```
+
+## Cycle 2: deploy, UI, report (outline)
+
+Order of work, each with a test written when the step starts:
+
+1. **Aurora smoke test (first step). DONE 2026-10-16, see Current status.** Original plan: create an Aurora PostgreSQL Serverless v2 cluster on the Free plan with minimum capacity 0 ACU. Enable the Data API. Run `CREATE EXTENSION vector`. If pgvector, minimum 0 ACU, or the Data API do not work on this account, switch to the RDS db.t4g.micro fallback and note the cost.
+2. **Data access layer. BUILT 2026-10-17, see Current status.** `db.connect()` reaches Aurora directly with an IAM token (`DB_TARGET=aurora`); no Data API backend. The Layer 3 and 4 database tests pass on both targets.
+3. **Load the data. DONE 2026-10-17 (PR #14), see Current status.** `fixed_400_prefix` (797 rows) and the whole `embedding_cache` are in Aurora; counts, dims and all 49 search results match the local database.
+4. **Lambda. DONE 2026-10-17 (PR #15), see Current status.** Package the pipeline and `handler.py`. Use an IAM role for Bedrock, the Data API, and S3 read. No access keys. Set a memory size, timeout, and a reserved concurrency cap. Add retry logic for the first query after Aurora resumes from a pause. Cold-start the function and record the time.
+5. **API Gateway. DONE 2026-10-17 (PR #16), see Current status.** Create the route, throttling (requests per second and a daily cap), a maximum question length, and a maximum output token count. Configure CORS for the S3 page origin. Test with `curl` and then from the page.
+6. **Frontend. DONE 2026-10-18 (PR #17), see Current status.** CloudFront with a private S3 bucket (OAC); `/api/*` through CloudFront to API Gateway; PDF links to the vendors' copies. Original plan: the page already exists (`datasheet-rag/web/index.html`, Layer 8b): question box, datasheet dropdown, answer with `[n]` links, and source cards with PDF links. Host it as a static website in S3 (VERIFY the current public-hosting setup) and point its `fetch` calls at the API Gateway URL. Decide where the PDF links point: the PDFs are vendor-copyrighted, so they are not public in S3 without checking. The page contains no secrets.
+7. **Deployed evaluation. DONE 2026-10-18, see Current status.** Run the final strategy against the deployed endpoint. Record latency (including cold starts and Aurora resume) and cost per query.
+7b. **Close the Aurora cost risk (added 2026-10-23, the human agreed fixes 1 to 5). DONE 2026-10-23, see Current status.** Own plan in plan mode, before step 8.
+   1. Check the request (JSON, length, document) before `db.connect()`, so junk requests never wake Aurora.
+   2. Delete the `GET /api/documents` route in API Gateway (the page no longer calls it; anyone could, through `SITE_URL` or the `execute-api` address).
+   3. Move the daily ask counter out of Aurora into a DynamoDB table (one atomic increment per day; VERIFY Free plan pricing), so a request over the cap never wakes Aurora. The same table can later hold the KB pipeline's cap (step 8), the upload counter (9a) and feedback records (9b).
+   4. Lower `API_DAILY_ASK_LIMIT` (for example 50), which bounds Aurora's awake time to about cap x 5 minutes a day.
+   5. An off switch: a Lambda variable such as `DEMO_ENABLED=false` that answers 503 before anything else, or the console's Throttle (concurrency 0; VERIFY it is allowed with the account's quota of 10).
+   Fixes 1, 3 and 5 live in the Lambda, so they hold for requests that come in on the `execute-api` address and skip CloudFront. The human creates the DynamoDB table and the Lambda role's permission in the console.
+8. **Knowledge Base pipeline, built in full, then both tested (added 2026-10-16, widened 2026-10-23). DONE 2026-10-24 (PR #20), see Current status.** A **Bedrock Managed KB** (the human's choice on 2026-10-23, replacing the S3 Vectors plan, because it answers "build your own or let AWS handle it"):
+   - AWS's managed parser, default chunking, managed embedder, hybrid search and managed reranker.
+   - `Retrieve` gives the top 10, and our `generate()` writes the answer, so the answer step is identical and the comparison measures retrieval. The Managed KB has no `RetrieveAndGenerate`.
+   - Same page with a toggle, the same `POST /api/ask` with a `pipeline` field, the same limits; the KB path never touches Aurora.
+   - Sub-steps: 8a ingest and page-number probe, 8b code, 8c local eval, 8d deploy and deployed KB pass. Results in `datasheet-rag/runs/kb_compare.md`, setup in `datasheet-rag/runs/kb_setup.md`.
+   - Left for after the results: RAGAS on the KB answers; a second KB with fixed-size chunking.
+9. **Upload, then feedback, on both pipelines, then both tested again (reordered 2026-10-23).** Starts only after step 8's results are final and recorded, so they stay unskewed. Each part has its own plan in plan mode.
+   - **9a PDF upload (added 2026-10-23).** One `rag/ingest.py` `ingest_pdf(conn, pdf_bytes, filename)` reusing parse, `chunk_document(..., "fixed_400_prefix")` and the load path. Ingestion runs in the background (Titan at 60 a minute makes a datasheet take minutes, past API Gateway's 30 s), so `POST /api/uploads` returns an `upload_id` and `GET /api/uploads/{id}` gives the status. Deployed: a presigned S3 PUT, an S3 event starts an ingest Lambda, paced below the Titan quota so visitors' questions still get through. Uploads are private (reachable only by `upload_id`), kept out of the default curated search so the 49-question results do not change (`documents.source`, `expires_at`), deleted after a TTL, and capped (file size, pages, chunks, daily uploads counted outside Aurora). "Open page" uses the browser's own copy of the file. KB side, to VERIFY in the plan: S3 plus metadata sidecar plus ingestion job with a metadata filter, or `RetrieveAndGenerate` with an external source. Risks: untrusted PDFs (check the type, time and memory limits, reject scanned files), prompt injection in uploaded text, chunking rules tuned on these four datasheets.
+   - **9b Feedback loop (added 2026-10-22),** on both pipelines. Design source: `feedback_driven_rag_aws_design.pdf` (repo root, gitignored), with the changes from the 2026-10-22 review:
+   - Flow: every answer (both pipelines) gets an `answer_id` and a saved record (question, passages with document and page, answer, model, prompt and config version, TTL); a public `POST /api/feedback` (reason plus optional comment, one rating per answer, throttled, length-limited); a review of the queue; a **diagnosis** (answer was correct, not in the datasheets, retrieval miss, misread, false refusal); a correction written by the human with a required document, page (checked on the rendered page) and scope; published to a **separate correction index** (own S3 prefix, ingestion job, `published` only after `Retrieve` returns it); then checks (same question, paraphrases, a negative control, and the 49 questions for regressions); a `report` of the metrics; `retract`.
+   - User comments never reach the model; only reviewer-written text is published. Corrections cite the datasheet page so citations stay page-level.
+   - Recommended, to confirm in the step's plan: review by a local CLI with the human's credentials (no reviewer endpoints, no login system); feedback and answer records in one DynamoDB table (does not wake Aurora). Correction cases go in `data/correction_cases.jsonl`; `data/questions.jsonl` stays frozen.
+   - VERIFY in the plan: S3 Vectors metadata filtering in a KB, metadata sidecar files, `StartIngestionJob` / `GetIngestionJob` fields, DynamoDB pricing on the Free plan. The human creates the table, prefix, route and IAM permissions in the console.
+   - Our pipeline: a `corrections` table (SQL in `rag/db.py`, vector from Titan), searched separately from the chunks with a closeness threshold and a document match, and merged as an extra passage (`[n] Verified note: <part> (<document>), page <page>`) that cites the datasheet page. Same checks as 9a, plus the 49 questions on our pipeline for regressions.
+   - **9c Test both again:** the 49 questions on both pipelines (regressions), the upload cases and `data/correction_cases.jsonl`.
+10. **Report.** Write the evaluation report: setup, the 40-question set, results table (recall@k, MRR, RAGAS faithfulness and relevancy, latency, cost), failure analysis by question type, the comparison with the Knowledge Base pipeline, the feedback loop's results, and what was learned. Add a recorded demo.
+11. **Teardown.** After publishing, run the teardown checklist and confirm in Billing that spend has stopped.
+
+### Teardown checklist
+
+- Delete the API Gateway API (`datasheet-rag-api`) and the Lambda function and its role (`datasheet-rag-lambda`). Remove the dev user's inline policy `rag-lambda-invoke`.
+- Disable, then delete, the CloudFront distribution `datasheet-rag-web` (before its bucket), and its origin access control. Cancel the Free flat-rate plan if it is listed separately.
+- Empty and delete the S3 bucket `datasheet-rag-web-...` (the page; no PDFs are in S3).
+- Delete the Managed Knowledge Base `datasheet-rag-kb` and its data source `datasheets` (AgentCore console), the KB source bucket `datasheet-rag-kb-...`, and the KB service role the console created. Remove the inline policy `rag-kb-query` from the dev user and from the Lambda role.
+- Delete the upload resources (step 9a): the upload bucket or prefix, the ingest Lambda and its role, the upload routes.
+- Delete the feedback loop's resources (step 9b): the Cognito user pool `datasheet-rag-review` and the JWT authorizer `cognito-reviewers`, the `/api/feedback` and `/api/review/*` routes, and the inline policy `rag-feedback`. The notes bucket and the KB data source `corrections` were already deleted on 2026-10-28. The note records go with the DynamoDB table; the `corrections` table goes with the Aurora cluster.
+- Delete the DynamoDB table `datasheet-rag-usage` (step 7b) and the inline policies `rag-usage-table` (Lambda
+  role) and `rag-usage-read` (dev user).
+- Delete the Aurora cluster (`datasheet-rag`). Skip the final snapshot unless one is wanted. Delete any manual snapshots. (The secret `datasheet-rag/rag_data` was already deleted on 2026-10-17.)
+- Remove the inline policy `rag-aurora-smoke` from the dev IAM user (if the user itself is not deleted first).
+- Delete the IAM user and its access keys.
+- Check CloudWatch log groups (including `datasheet-rag-api-access` and `/aws/lambda/datasheet-rag`), and delete them.
+- Check Billing and Cost Management the next day and a week later. Confirm no new charges.
+- Remember the Free plan lasts 6 months from sign-up (about early April 2027; confirm the exact date in Billing). Projects 3 and 5 must be planned inside that window or the account must be upgraded.
+
+## Gotchas collected from the lessons
+
+Models and embeddings
+- LLMs produce likely text, not true text. Grounding rules help but do not guarantee faithfulness. Evaluate.
+- Use the same embedding model for chunks and questions. Changing the model means changing `vector(n)` if needed and re-embedding everything.
+- Embeddings are weak on exact strings (part numbers, values). Keep keyword search in the pipeline.
+- The reranker takes text, not vectors. It reads about 512 tokens per document including the question. Longer chunks are split and cost more.
+
+Parsing and chunking
+- Check parsed tables by eye. Column headers must stay with values.
+- Symbols (Ω, µ, ±) and subscripts can parse wrongly and change a value.
+- Printed page numbers can differ from PDF page positions. Citations use PDF position.
+- Tables stay whole where possible. Repeat headers when splitting.
+- Overlap costs more chunks and can return duplicate passages.
+
+Postgres and pgvector
+- Postgres is a server that must be running. psycopg is only a client.
+- `vector(n)` must match the model output. A wrong length gives an error.
+- Keep the raw `<=>` alone in `ORDER BY` so an index can be used. Compute `1 - distance` only in `SELECT`.
+- Build an index with the matching operator class (`vector_cosine_ops` for `<=>`).
+- With an HNSW index, a `WHERE` filter is usually applied after the nearest vectors are found, so a filter can return fewer than k rows. Exact search applies filters correctly.
+- `plainto_tsquery` requires every word to match. Use an OR-joined query.
+- Always pass values through placeholders. Never build SQL by string joining.
+- Run `CREATE EXTENSION vector` before creating tables that use it.
+- Keep the vector and keyword results as ranked lists of ids and merge them with RRF, not by adding scores.
+
+Generation and citations
+- We create the `[n]` labels and the label-to-chunk mapping. The model only repeats labels. A label can still be wrong or invalid. Validate every label.
+- Include unanswerable questions in the test set.
+
+Evaluation
+- Retrieval metrics and answer metrics are separate. Fix retrieval first.
+- Index recall (approximate vs exact search) and recall@k (against hand-written ground truth) are different measurements.
+- Change one thing at a time. Keep the question set fixed.
+- LLM judges are LLMs and can be wrong, and each judged answer costs several calls.
+
+AWS and cost
+- Keep everything in one region, us-east-1. Check the region selector in the console.
+- Roles, not secret keys, for Lambda. Local development uses a narrowly scoped IAM key kept out of Git.
+- A Lambda inside a VPC cannot reach Bedrock without a NAT gateway or VPC endpoint, which bill hourly. Use the Data API so Lambda stays outside the VPC.
+- Aurora resumes slowly after a pause. Add retry logic.
+- Always-on databases are the main credit risk. Pause or delete.
+- A public API URL can be called by anyone. Use API Gateway throttling, a Lambda concurrency cap, a question length limit, and an output token limit. Budget alerts only warn, they do not stop spending.
+- CORS blocks are enforced by the browser. The Lambda can run fine and the page can still show an error.
+- Never put Bedrock or database credentials in the frontend.
+- Package Lambda dependencies for Linux, or use only boto3 and the standard library.
+- The Free plan expires after 6 months or when credits are used. Plan around it.
+
+## Test commands (created as each layer is built)
+
+```
+pytest -q tests/test_parse.py
+pytest -q tests/test_chunk.py
+pytest -q tests/test_search.py
+pytest -q tests/test_generate.py
+pytest -q tests/test_metrics.py
+pytest -q                                   # everything
+python -m rag.eval.run_eval baseline --dry-run      # names, or --group <g>, or --all; prints calls, cost, minutes
+python -m rag.eval.run_eval baseline               # real run, asks first; --yes does not ask
+.venv-ragas\Scripts\python -m rag.eval.ragas_run --shortlist --dry-run   # RAGAS judge (Python 3.13 venv); --limit N, --yes
+pytest -q tests/test_judge.py
+python -m rag.pipeline "What is the maximum supply voltage?"
+python -m rag.server                                # web UI at http://127.0.0.1:8000
+pytest -q tests/test_api.py tests/test_server.py
+```
+
+## Definition of done
+
+Cycle 1 is done when:
+- All layer tests pass (`pytest -q` is green).
+- 4 or 5 datasheets are parsed, chunked, embedded, and stored, and the parsed tables were reviewed by eye.
+- `data/questions.jsonl` has about 40 hand-checked questions, including unanswerable ones.
+- `runs/results.csv` compares chunking, retrieval, reranker, and k strategies on recall@k, MRR, latency, and cost per query, and RAGAS faithfulness and relevancy for the shortlisted strategies.
+- The best configuration is chosen with numbers and frozen in `rag/config.py`.
+- `python -m rag.pipeline` answers real questions with document and page citations, and says "not contained" for unanswerable ones.
+- Total cloud spend so far is recorded in the cost log.
+
+Cycle 2 is done when:
+- The pipeline runs behind API Gateway and Lambda, with Aurora as the database and the page hosted in S3, and the same query tests pass against the deployed backend.
+- The web page answers a question end to end with page-level citations.
+- The throttling, concurrency cap, and input limits are in place and tested.
+- The deployed evaluation records latency and cost per query.
+- The Knowledge Base pipeline runs behind the same page (toggle) and is evaluated on the same 49 questions and compared with ours on retrieval and answers.
+- A user can upload a PDF and ask about it on both pipelines.
+- The feedback loop runs end to end (feedback, review, correction, publishing, retrieval check, regression check) on the Knowledge Base pipeline and on our pipeline, after that comparison, and both are tested again.
+- The evaluation report and a recorded demo are in the repo.
+- The teardown checklist is complete and Billing confirms spending has stopped.

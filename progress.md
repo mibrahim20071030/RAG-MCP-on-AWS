@@ -4,7 +4,15 @@ One entry per working session, newest first. Each entry records the date, what w
 
 ## Your checklist
 
-Next session (Cycle 2):
+Project 3 (remote MCP server), Layer 0:
+
+- [x] 2026-11-21: AWS billing alert confirmed (zero spend budget, Healthy).
+- [ ] Commit the Layer 0 changes on branch `project-3` (the `CLAUDE.md` move and the new root `CLAUDE.md`), push, open a PR, and check that CI is green.
+- [x] 2026-11-21: Project 3 parallel split kept as proposed.
+- [ ] Uninstall the `code-review` and `code-simplifier` plugins (`/plugin`), then restart Claude Code so the `superpowers` setting takes effect.
+- [ ] Before Layer 6: decide the open items in `CLAUDE.md`, "Open decisions for Ibrahim".
+
+Project 2 (Cycle 2):
 
 - [x] 2026-10-17: step 2 Aurora test run approved and passed.
 - [x] 2026-10-17: step 2 PR merged (#13, `bc7d476`).
@@ -193,6 +201,24 @@ Cycle 2 (deploy, UI, report):
   2026-11-10), `/api/ask` throttle rate 0.5, burst 10 (set by the human; the dev user cannot read API Gateway).
 - [ ] 10c. After the LinkedIn traffic: put both caps back to 50 and the `/api/ask` throttle back to rate 0.05, burst 3.
 - [ ] 11. Teardown checklist (including the Knowledge Base and feedback-loop resources), then confirm in Billing that spend has stopped. Wait until the LinkedIn traffic is over.
+
+## 2026-11-21 — Session 32: Project 3 setup (Layer 0)
+
+- Project 3 (a remote MCP server for the datasheet search) is built inside this repo, as its blueprint assumes. The human chose this over a separate repo.
+- Branch `project-3` created from `main`. Project 2's `CLAUDE.md` moved to `docs/CLAUDE_project2.md` with `git mv`. The new root `CLAUDE.md` covers both projects: an overview of Project 2 (done) and Project 3 (built on top of it), a short Project 2 section pointing to the old file, the Project 3 blueprint, and the shared rules, environment notes and parallel-build process carried over from Project 2. The human asked for this framing so Project 2 is not pushed aside.
+- The project template (`Project-template` on GitHub) was compared with this repo: its hooks, checks, CI workflow and agents are already here and already set up for `datasheet-rag/`, so nothing from it was copied in. The blueprint says to keep Project 2's hooks as they are.
+- Problem: the billing alert could not be checked. Why: the dev user `Ibrahim-Dev` has no `budgets:ViewBudget` permission. Fix: the human checks it in the console.
+- Decided (proposal, to confirm): Layers 3 and 5 are built in parallel, the rest by one agent (table in `CLAUDE.md`).
+- The three Project 3 PDFs moved from the `P3 - MCP` folder to `docs/project3/` (gitignored, like the Project 2 study PDFs). The `P3 - MCP` folder is no longer needed; the human will delete it.
+- The human deleted the `P3 - MCP` folder and renamed this folder from `P2 - RAG Pipeline` to `P2 & P3 - RAG and MCP`.
+- Problem: after the rename, `pip.exe` and `pytest.exe` in `datasheet-rag\.venv` failed (exit 1, no output). Why: a venv's launcher `.exe` files store the full path of the venv's `python.exe`, which still pointed at the old folder. Fix: `python -m venv .venv` from the base Python 3.14 (rewrites the activate scripts and `pyvenv.cfg` for the new path), then `pip install --force-reinstall --no-deps` of the 8 packages that have launchers, at the same versions. `pip freeze` is unchanged (26 packages). `.venv-ragas` still has the old path; not fixed because Project 3 does not use it.
+- Claude Code's memory is stored per folder path, so the four working-rule memories were copied from the old Project 2 memory folder to the new one.
+- Checks after the fix: secrets ok, ruff ok, pytest 1,132 passed, 212 skipped.
+- Billing alert: the human confirmed the zero spend budget (AWS template, budgeted amount $1) exists, status Healthy.
+- `.gitignore`: `agentic-ai-foundations.pdf`, `Architecture.pdf` and `walkthroughs/` were ignored only by this clone's `.git/info/exclude`; now they are in `.gitignore`, plus a `*.pdf` catch-all. `datasheet-rag/runs/demo_script.md` (the step 10 demo GIF script; the demo was dropped) is ignored too.
+- Parallel split for Project 3 (Layers 3 and 5): the human said to leave it as proposed.
+- Plugins: the human installed `superpowers`, `code-review`, `code-simplifier`, `pr-review-toolkit`, `security-guidance` and `frontend-design`. Decided: `superpowers` off for this repo (`enabledPlugins` in `.claude/settings.json`); `pr-review-toolkit`'s `silent-failure-hunter` (Layers 3, 5, 6, 7) and `pr-test-analyzer` (layers with tests) added to the review step in `CLAUDE.md`; `security-guidance` kept; the plugin `code-review` and `code-simplifier` to be uninstalled by the human (duplicates of the built-in `/code-review` and `/simplify`).
+- Still open: the commit and push, CI green on the PR. Then Layer 1 planning.
 
 ## 2026-11-10 — Session 31: getting ready for LinkedIn traffic
 

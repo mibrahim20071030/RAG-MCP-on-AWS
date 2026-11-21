@@ -22,6 +22,8 @@ datasheet-rag/build/
 **/runs/*
 !**/runs/*.md
 !**/runs/results*.csv
+# Project 2 demo GIF script; the demo was dropped (step 10), so it stays local
+datasheet-rag/runs/demo_script.md
 
 # Datasheets stay local (vendor copyright)
 datasheet-rag/data/pdfs/
@@ -29,3 +31,10 @@ datasheet-rag/data/pdfs/
 # Personal study material
 Project2_Study_Guide.pdf
 feedback_driven_rag_aws_design.pdf
+agentic-ai-foundations.pdf
+Architecture.pdf
+walkthroughs/
+docs/project3/
+
+# No PDF is ever committed (tools/checks.py also blocks them)
+*.pdf
