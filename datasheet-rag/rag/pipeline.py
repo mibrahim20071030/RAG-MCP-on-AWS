@@ -14,7 +14,8 @@ import time
 import psycopg
 from botocore.exceptions import BotoCoreError, ClientError
 
-from rag import config, corrections, costlog, db, generate, rerank, search
+from rag import config, corrections, costlog, db, generate, retrieve
+from rag.retrieve import ms_since
 
 REFUSED = """
 Bedrock refused a call: {error}
@@ -27,38 +28,31 @@ Likely reasons, most likely first:
 """
 
 
-def _ms_since(start: float) -> float:
-    return round((time.perf_counter() - start) * 1000, 1)
-
-
 def answer_question(conn, question: str, document: str | None = None, embed_fn=None, rerank_client=None,
                     generate_client=None) -> dict:
     """Answer one question from the datasheets, with sources as document and page.
 
     `document` limits the search to one datasheet (None: all). The result is what `generate.generate` returns,
     plus `question`, the `passages` the model was given (in label order) and `timings_ms` per step; the search
-    time includes embedding the question when it is not cached.
+    time includes embedding the question when it is not cached. Search and rerank are `retrieve.retrieve_passages`,
+    the same step the MCP tool uses.
 
     With notes on (step 9b, config.CORRECTIONS_ENABLED), the published reviewers' notes closest to the question go
     before the reranked passages; they reuse the question's vector, so they cost nothing.
     """
-    start = time.perf_counter()
-    hits = search.search(conn, question, config.SEARCH_MODE, document=document, embed_fn=embed_fn)
-    search_ms = _ms_since(start)
-
-    start = time.perf_counter()
-    passages = rerank.rerank(conn, question, hits, client=rerank_client)
-    rerank_ms = _ms_since(start)
-    timings = {"search": search_ms, "rerank": rerank_ms}
+    retrieved = retrieve.retrieve_passages(conn, question, document=document, embed_fn=embed_fn,
+                                           rerank_client=rerank_client)
+    passages = retrieved["passages"]
+    timings = dict(retrieved["timings_ms"])
 
     if config.CORRECTIONS_ENABLED:
         start = time.perf_counter()
         passages = corrections.match(conn, question, document, embed_fn=embed_fn) + passages
-        timings["notes"] = _ms_since(start)
+        timings["notes"] = ms_since(start)
 
     start = time.perf_counter()
     result = generate.generate(question, passages, client=generate_client)
-    timings["generate"] = _ms_since(start)
+    timings["generate"] = ms_since(start)
 
     return {"question": question, **result, "passages": passages, "timings_ms": timings}
 

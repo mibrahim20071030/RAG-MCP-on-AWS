@@ -90,7 +90,8 @@ Design documents: `docs/project3/` (blueprint, code tour, tooling; local only).
 
 Format: `Layer N, date: what differs from the reference design, and why.`
 
-(empty)
+- Layer 1, 2026-11-21: `retrieve_passages` returns `timings_ms` (`search`, `rerank`) beside `passages` and `reranked`. Why: the API response and the deployed evaluation read separate search and rerank times from `answer_question`; without it they could only be timed together. The MCP tool can use it for the Layer 8 latency table. (Proposal by Claude, approved in the Layer 1 plan.)
+- Layer 1, 2026-11-21: one Project 2 test line changed, against "existing tests unchanged": `tests/test_corrections.py:264` now replaces `rerank.rerank` on its own module with a fake that accepts `k`, instead of reaching it through `pipeline.rerank`. Why: `pipeline.py` no longer imports `rerank`, and `retrieve_passages` always passes `k`; keeping the line would have needed an unused import and a special case in real code. What the test checks is unchanged (Ibrahim chose this, 2026-11-21).
 
 ### Status log
 
@@ -99,6 +100,11 @@ Format: `Layer N, date: what differs from the reference design, and why.`
   - Done: the AWS billing alert. Ibrahim confirmed the zero spend budget in the console (status Healthy); the dev user `Ibrahim-Dev` cannot read budgets.
   - Done: the folder was renamed to `P2 & P3 - RAG and MCP`; the venv launchers were rebuilt for the new path; PDFs and `runs/demo_script.md` are in `.gitignore`.
   - Done: CI green on the PR; merged into `main`.
+- Layer 1, 2026-11-21 (built; waiting for Ibrahim's commit, PR and merge):
+  - NEW `rag/retrieve.py`: `retrieve_passages` (search, then rerank; `ms_since` moved here from `pipeline.py`). `answer_question` in `rag/pipeline.py` calls it; notes and generation unchanged.
+  - NEW `tests/test_retrieve.py` (17 tests, fakes only). Checks: 1,149 passed, 212 skipped; ruff clean.
+  - Review (built-in `/code-review` and `pr-test-analyzer`): `retrieve` added to `RAG_MODULES` in `scripts/build_lambda.py` (the Project 2 Lambda build would have stopped); `k` below 1 raises `ValueError`; the docstring says `reranked` is the setting, not proof a rerank call was made; a test that `answer_question` hands its clients on. Not changed: `rag/kb.py` keeps its own `_ms_since` (no layer asks to change `kb.py`).
+  - The optional free check on the local database was skipped (Docker Desktop not running).
 
 ## Environment notes (both projects)
 

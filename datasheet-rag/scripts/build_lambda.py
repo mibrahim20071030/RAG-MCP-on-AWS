@@ -25,10 +25,10 @@ PYTHON_VERSION = "3.14"  # the Lambda runtime python3.14
 PLATFORMS = ("manylinux2014_x86_64", "manylinux_2_28_x86_64")  # the x86_64 runtime is Amazon Linux 2023, glibc 2.34
 # Packed with the pins of requirements.txt, so Lambda runs the versions the tests ran with.
 PACKAGES = ("psycopg[binary]", "boto3")
-# The modules the query path imports (handler -> api -> pipeline -> search, rerank, generate; api -> kb, uploads).
-# Not parse, chunk, load, ingest, server or eval: they need pdfplumber or the PDFs.
+# The modules the query path imports (handler -> api -> pipeline -> retrieve -> search, rerank; pipeline ->
+# generate; api -> kb, uploads). Not parse, chunk, load, ingest, server or eval: they need pdfplumber or the PDFs.
 RAG_MODULES = ("__init__", "api", "chunk_base", "config", "corrections", "costlog", "db", "embed", "generate", "kb",
-               "pipeline", "records", "rerank", "review", "search", "uploads", "usage")
+               "pipeline", "records", "rerank", "retrieve", "review", "search", "uploads", "usage")
 # Imported inside handler.ingest_handler only, which runs in the ingest function, never in the API function.
 LAZY_MODULES = ("ingest",)
 # The ingest function (step 9a) also parses and chunks: pdfplumber and the Layer 1 to 3 modules.

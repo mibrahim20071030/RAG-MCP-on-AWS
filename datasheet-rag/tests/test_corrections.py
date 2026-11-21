@@ -5,7 +5,7 @@ import contextlib
 
 import pytest
 
-from rag import config, corrections, db, generate, kb, pipeline, records, review, search
+from rag import config, corrections, db, generate, kb, pipeline, records, rerank, review, search
 
 ANSWER = "ab" * 16
 DIMS = config.EMBED_DIMENSIONS
@@ -261,7 +261,7 @@ def test_pipeline_puts_published_notes_first(setup, monkeypatch):
     setup["db"].rows["n1"] = {"document": "lm35", "page": 4, "text": "note text", "status": "published"}
     monkeypatch.setattr(search, "search", lambda conn, q, mode, document=None, embed_fn=None: [{"id": 1}])
     hit = {"id": 1, "document": "lm35", "page": 2, "page_label": None, "kind": "text", "text": "datasheet text"}
-    monkeypatch.setattr(pipeline.rerank, "rerank", lambda conn, q, hits, client=None: [hit])
+    monkeypatch.setattr(rerank, "rerank", lambda conn, q, hits, k=None, client=None: [hit])
     seen = {}
 
     def fake_generate(question, chunks, client=None):
