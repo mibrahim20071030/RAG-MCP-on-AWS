@@ -97,6 +97,24 @@ def test_new_style_tools_list_shows_the_one_tool(client):
     assert [tool["name"] for tool in response.json()["result"]["tools"]] == [TOOL]
 
 
+def test_discover_says_the_lists_never_change(client):
+    headers, body = new_style("server/discover", {})
+    response = client.post("/mcp", headers=headers, json=body)
+    assert response.status_code == 200
+    capabilities = response.json()["result"]["capabilities"]
+    for kind in ("tools", "prompts", "resources"):
+        assert not (capabilities.get(kind) or {}).get("listChanged"), kind
+    assert not (capabilities.get("resources") or {}).get("subscribe")
+
+
+def test_subscriptions_listen_is_refused_at_once(client):
+    # On Lambda an open listen stream held the function until its 60 s timeout; now it is not served.
+    headers, body = new_style("subscriptions/listen", {"notifications": {"toolsListChanged": True}})
+    response = client.post("/mcp", headers=headers, json=body)
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["error"]["code"] == -32601  # method not found
+
+
 def test_new_style_without_meta_is_400_invalid_params(client, fakes):
     headers, body = new_style("tools/call", {"name": TOOL, "arguments": ARGS}, name=TOOL)
     del body["params"]["_meta"]

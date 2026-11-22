@@ -72,19 +72,20 @@ Design documents: `docs/project3/` (blueprint, code tour, tooling; local only).
 
 ### Unverified items (do not assert; test in the layer shown)
 
-- Which protocol version Claude sends at runtime: its docs describe the older `initialize` handshake (Layer 8: log the first requests).
+- Settled 2026-11-22 (Layer 8): which protocol version Claude sends. Its check before login (client "Anthropic 1.0.0", user agent `python-httpx`) sends `initialize` with 2025-11-25 and gets 401; after login every request is 2026-07-28 style (`server/discover`, `tools/list`, `prompts/list`, `resources/list`, `tools/call`, `subscriptions/listen`; user agent `Claude-User`).
 - Mangum plus per-call app build on real Lambda (Layer 7). Settled 2026-11-21 in Docker on `public.ecr.aws/lambda/python:3.14`: Mangum 0.22.0 with a new app per call works; all Linux cp314 wheels exist; `mcp.zip` is 32.6 MB zipped, 74.8 MB unzipped. Still to measure on Lambda: the cold start (10.2 s in Docker through a Windows bind mount).
-- Cognito discovery accepted by Claude (Layer 8). Resource indicators settled locally in Layer 5: binding works when the scope belongs to a resource server named after the exact MCP URL (see Differences log); whether Claude sends `resource=` is Layer 8. Fallback: static header option.
+- Settled 2026-11-22 (Layer 8): Cognito discovery and login work with Claude, using "Use your own OAuth client" (the public client ID, secret blank). Still open: whether Claude sends `resource=` (the token's `aud` is not logged; check in 8c, for example by logging `aud` present or not).
 - How Claude shows a bare gateway 429 (Layer 8: not testable without Claude; the throttle is set, burst 5, rate 1/s).
 - Settled 2026-11-21 (Layer 7): the gateway returns 404 `{"message":"Not Found"}` for `GET /mcp` (no route) and the Lambda does not run.
-- The Request headers (static header) option on Ibrahim's account (Layer 8).
+- The Request headers (static header) option on Ibrahim's account (Layer 8; not needed now that OAuth works).
 - Inspector CLI flag names: run `--help` first and record what works here.
-- Whether Claude's requests to the server carry an `Origin` header (with `allowed_hosts` set, any Origin gets 403) (Layer 8). Layer 7 logs `origin_present` on every call; curl and urllib send none.
+- Settled 2026-11-22 (Layer 8): Claude's requests carry no `Origin` header (`origin_present` false on every logged call), so the 403 rule does not affect it.
 
 ### Open decisions for Ibrahim
 
 - Structured result versus text-only (default structured; Layer 8 decides).
-- Layer 8: Aurora woke in more than 19 s both times in Layer 7, so the first search after a pause gets "try again". Keep (Claude retries), or move time from Bedrock to the connect inside the 25 s budget.
+- Layer 8: Aurora woke in more than 19 s both times in Layer 7, so the first search after a pause gets "try again". Keep (Claude retries), or move time from Bedrock to the connect inside the 25 s budget. Data 2026-11-22: Claude retried by itself both times (200 in 5.0 s and 1.7 s), so keeping it is supported.
+- Layer 8 (next session): speed options, proposed by Claude 2026-11-22. (1) Lambda memory 512 to 1024 MB, measured in 8c against 512 MB (more CPU: cold start 2.5 to 3.3 s now). (2) Aurora pause delay raised only for the measurement and demo session, then set back (about $0.06 per extra idle hour at 0.5 ACU; verify the allowed range); plus a wake-up search first (free). Not proposed: provisioned concurrency (always-on), dropping the reranker.
 - Settled 2026-11-21 (Layer 7): gateway burst 5, rate 1/s on `POST /mcp` and the metadata GET.
 - Settled 2026-11-21 (Layer 6): fixed windows, not spacing; 3 per user a minute, 100 a day for all users, 3 paid reranks a minute shared.
 
@@ -130,7 +131,17 @@ Format: `Layer N, date: what differs from the reference design, and why.`
 - Layer 7, 2026-11-21: `build/mcp.zip` is built from the exact `.venv` versions with Linux markers and `--no-deps` (NEW `linux_closure`), because pip's `--platform` still judges markers on Windows and asked for `pywin32` (from `mcp`). `pinned()` now cuts `# comments` after a pin. The Project 2 zips are built as before.
 - Layer 7, 2026-11-21: kept (review): a rerank refused after a paid question embed still gives the daily place back (about $0.000002; Layer 6 rule). A Bedrock `nextToken` page is time-checked but takes no second slot.
 
+- Layer 8, 2026-11-22: the deployed server is built with `MCPServer(..., subscriptions=False)`. Why: Claude opens a `subscriptions/listen` stream (2026-07-28) as soon as a chat starts and again about every 30 s (the gateway cuts it at 30 s); Mangum on Lambda kept each one until the 60 s timeout, each holding one of the account's 10 concurrent slots. The tool list never changes, so nothing is lost: the method is not served (-32601 at once) and `server/discover` says `listChanged` false; Claude then stopped sending it (checked live). Source: mcp 2.3.0 `mcpserver/server.py:184,229`, `lowlevel/server.py:597` (Ibrahim chose this, 2026-11-22).
+- Layer 8, 2026-11-22: `mcp_handler` prints a start line and an end line per call (same request id), and logs `Accept` and the `initialize` fields. Why: a call the Lambda timeout kills never reached the old end-only line, so the hang above could not be named (Ibrahim chose this, 2026-11-22).
+- Layer 8, 2026-11-22: the claude.ai connector uses "Use your own OAuth client" (public client, no secret), not Claude's published identity (Cognito does not advertise client ID metadata documents or `none` auth) nor dynamic registration (off in the pool; open registration lets anyone add a client).
+
 ### Status log
+
+- Layer 8, 2026-11-22 (in progress; 8a and 8b done, 8c next session):
+  - Plan approved (single agent; write-up in new sections of `README.md` and `REPORT.md`; 20 questions by script plus 5 in claude.ai; teardown scope decided after the demo). Plan: `~/.claude/plans/iridescent-herding-hoare-of-2e8d6cce-8b7d-450a-8ac4-144ce3c0a625.md`.
+  - 8a: docs checked 2026-11-22 (claude.com connector pages; AWS Cognito DCR page; the pool's live `openid-configuration`: S256, no `registration_endpoint`, auth methods `client_secret_basic`/`client_secret_post`; `oauth-authorization-server` 400). `mcp_handler` log lines: a start line and an end line per call with the request id, `Accept`, and for `initialize` the protocol version and client name and version. NEW `scripts/mcp_measure.py` (`estimate`, `warm`, `limits`, `cold`; the deployed scope is built from `MCP_API_URL`; a yes before paid calls; rows saved per call). NEW `tests/test_mcp_measure.py`; tests added in `tests/test_mcp_handler.py` and `tests/test_mcp_app.py`. Review: built-in `/code-review` (2 important, 5 nits, fixed) and `pr-test-analyzer` (fixed); recorded 1 of 2. Checks: 1,725 passed; ruff clean.
+  - 8b: connector added in claude.ai (`runs/mcp_connect.md`); questions answered with the right pages (LM35 35 V, page 4; ESP32 520 KB SRAM, page 26). First search of each chat after a pause got `DB_NOT_READY`; Claude retried by itself. Found and fixed: `subscriptions/listen` held a Lambda to its 60 s timeout about every 30 s while a chat was open; now `subscriptions=False` (see Differences log); checked live, no hang after the upload.
+  - Next session: decide the speed options (Open decisions), then 8c: `mcp_measure.py estimate` (cost printed, a yes), `warm`, `limits`, `cold`; 5 questions in claude.ai; deployed login tests; `runs/mcp_measure.md`; settle structured versus text-only and the Aurora budget. Then 8d (README, REPORT, demo script) and 8e (teardown guide; scope chosen then). Walkthrough PDF `walkthroughs/Project3/Layer8_Walkthrough.pdf` at the end.
 
 - Layer 0, 2026-11-21 (done; PR #25 merged, `97530e8`):
   - Done: branch `project-3` created from `main`; Project 2's `CLAUDE.md` moved to `docs/CLAUDE_project2.md` with `git mv` (Ibrahim chose to build Project 3 inside this repo); this file is the root one; checks pass locally.

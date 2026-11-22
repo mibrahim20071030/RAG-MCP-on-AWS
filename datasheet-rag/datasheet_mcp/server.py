@@ -21,8 +21,12 @@ INSTRUCTIONS = "Search the datasheets of four hardware parts (STM32F205/207, TCT
 
 
 def build_server(deps: Deps, **server_kwargs) -> MCPServer:
-    """A server with search_datasheets registered, calling the given deps."""
-    mcp = MCPServer("datasheet-search", instructions=INSTRUCTIONS, **server_kwargs)
+    """A server with search_datasheets registered, calling the given deps.
+
+    subscriptions=False: `subscriptions/listen` (2026-07-28) is not served, and `server/discover` says the lists
+    never change (listChanged false). The tool list is fixed, and on Lambda each listen stream stayed open until
+    the 60 s timeout (Layer 8: Claude opened one about every 30 s while a chat was open)."""
+    mcp = MCPServer("datasheet-search", instructions=INSTRUCTIONS, subscriptions=False, **server_kwargs)
 
     @mcp.tool(name="search_datasheets", title="Search datasheets", description=tools.SEARCH_DESCRIPTION,
               annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False, idempotent_hint=True))

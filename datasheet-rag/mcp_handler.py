@@ -10,8 +10,10 @@ datasheet_mcp.app.build_app, and the app's ASGI reply back into the response API
 - The app is built on every call. An app can be started only once (the SDK's session manager refuses a second run),
   and Mangum runs the app's startup and shutdown around each call (lifespan="auto").
 - One URL setting, MCP_PUBLIC_URL, gives the metadata document's URL and the one Host header accepted.
-- Each call prints one JSON line (status, time, the MCP headers, whether an Origin header came, the user agent). No
-  token, query or body is logged; only the JSON-RPC method name is read from the body.
+- Each call prints a JSON start line (request id, the MCP headers, whether an Origin header came, the user agent,
+  Accept) and an end line (the same, plus status and time), so a call the Lambda timeout kills still shows up. No
+  token, query or body is logged; from the body only the JSON-RPC method name is read, and for an `initialize`
+  request the protocol version and the client's name and version (Layer 8: which protocol era Claude uses).
 """
 import base64
 import binascii
@@ -82,20 +84,24 @@ def lambda_handler(event, context, setup: Setup | None = None) -> dict:
     start = time.perf_counter()
     response = None
     try:
+        line = request_summary(event if isinstance(event, dict) else {})
+    except Exception as error:  # noqa: BLE001 (the summary is best effort; the reply comes first)
+        line = {"summary_error": type(error).__name__}
+    request_id = getattr(context, "aws_request_id", None)
+    line = {"request_id": request_id if isinstance(request_id, str) else None, **line}
+    # A start line too: a request the Lambda timeout kills never reaches the end line (Layer 8 saw one hang 60 s).
+    print(json.dumps({"phase": "start", **line}), flush=True)
+    try:
         setup = setup or _shared_setup()
         app = build_app(setup.deps, setup.allowed_hosts, **setup.login)
         response = Mangum(app, lifespan="auto")(event, context)
         return response
     finally:
-        # Printed on failures too (status null), so every call leaves a line in CloudWatch. Never raises: an error
-        # here would replace the response, or the real error.
+        # Printed on failures too (status null), so every call leaves an end line in CloudWatch. Never raises: an
+        # error here would replace the response, or the real error.
         status = response.get("statusCode") if isinstance(response, dict) else None
         total_ms = round((time.perf_counter() - start) * 1000, 1)
-        try:
-            line = request_summary(event if isinstance(event, dict) else {})
-        except Exception as error:  # noqa: BLE001 (the summary is best effort; the reply comes first)
-            line = {"summary_error": type(error).__name__}
-        print(json.dumps({**line, "status": status, "total_ms": total_ms}), flush=True)
+        print(json.dumps({"phase": "end", **line, "status": status, "total_ms": total_ms}), flush=True)
 
 
 def _mapping(value) -> dict:
@@ -106,20 +112,25 @@ def request_summary(event: dict) -> dict:
     """The parts of a request that are logged: no token, query or body text."""
     http = _mapping(_mapping(event.get("requestContext")).get("http"))
     headers = {str(name).lower(): str(value) for name, value in _mapping(event.get("headers")).items()}
-    return {
+    message = _body_message(event)
+    method = _rpc_method(message)
+    line = {
         "method": http.get("method"),
         "path": event.get("rawPath"),
-        "rpc_method": _rpc_method(event),
+        "rpc_method": method,
         "mcp_method": headers.get("mcp-method", "")[:LOG_TEXT_MAX] or None,
         "protocol_version": headers.get("mcp-protocol-version", "")[:LOG_TEXT_MAX] or None,
         "origin_present": "origin" in headers,
         "user_agent": headers.get("user-agent", "")[:LOG_TEXT_MAX] or None,
+        "accept": headers.get("accept", "")[:LOG_TEXT_MAX] or None,  # text/event-stream: the client takes a stream
     }
+    if method == "initialize":
+        line.update(_initialize_summary(message))
+    return line
 
 
-def _rpc_method(event: dict) -> str | None:
-    """The JSON-RPC `method` of the body (for example "initialize" or "tools/call"), or None. Older-style clients
-    send no Mcp-Method header, so this is how Layer 8 sees which handshake Claude uses."""
+def _body_message(event: dict) -> dict | None:
+    """The JSON-RPC message of the body, or None when there is none or it is not a JSON object."""
     body = event.get("body")
     if not body:
         return None
@@ -128,5 +139,27 @@ def _rpc_method(event: dict) -> str | None:
         message = json.loads(raw)
     except (binascii.Error, ValueError, TypeError, RecursionError):  # RecursionError: a deeply nested body
         return None
-    method = message.get("method") if isinstance(message, dict) else None
+    return message if isinstance(message, dict) else None
+
+
+def _rpc_method(message: dict | None) -> str | None:
+    """The JSON-RPC `method` (for example "initialize" or "tools/call"), or None. Older-style clients send no
+    Mcp-Method header, so this is how Layer 8 sees which handshake Claude uses."""
+    method = message.get("method") if message else None
     return method if isinstance(method, str) and len(method) <= METHOD_MAX else None
+
+
+def _short(value) -> str | None:
+    return value[:LOG_TEXT_MAX] if isinstance(value, str) and value else None
+
+
+def _initialize_summary(message: dict) -> dict:
+    """From an older-style `initialize` request: the protocol version the client asks for, and the client's name and
+    version (its clientInfo). These name the client and its protocol era; they carry no user data."""
+    params = _mapping(message.get("params"))
+    client = _mapping(params.get("clientInfo"))
+    return {
+        "init_protocol_version": _short(params.get("protocolVersion")),
+        "client_name": _short(client.get("name")),
+        "client_version": _short(client.get("version")),
+    }
