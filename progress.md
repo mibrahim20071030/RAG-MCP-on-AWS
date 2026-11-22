@@ -29,7 +29,7 @@ Project 3 (remote MCP server), Layer 0:
 - [x] 2026-11-21: Layer 5 committed on `project-3-layer-5`, PR #30 merged (`8eb7498`).
 - [x] 2026-11-21: Layer 6 decisions: fixed windows; 3 per user a minute / 100 a day / 3 reranks a minute; daily place given back when nothing was paid; rerank slot 1 per 20 s (after the review).
 - [ ] Read `walkthroughs/Project3/Layer6_Walkthrough.pdf`.
-- [ ] Layer 6: make the branch (for example `git switch -c project-3-layer-6`; the uncommitted work moves with it), commit, push, PR, CI green, merge.
+- [x] 2026-11-21: Layer 6 committed, PR #31 merged (`4cbb9b2`).
 
 Project 2 (Cycle 2):
 
@@ -230,6 +230,7 @@ Cycle 2 (deploy, UI, report):
 - Review: built-in `/code-review`, `silent-failure-hunter`, `pr-test-analyzer`. Fixed: a broken rerank counter now gives the daily place back; `real_limits()` refuses to start deployed with a limit missing, or with a limit and no `USAGE_TABLE`; refusals logged at INFO and throttles at WARNING; key and day in counter logs; user id read only when limits are on; `.env.example` block moved; tests through the real `rag.rerank` and `rag.usage`. Problem found: a fixed 1-minute rerank window lets 6 calls out within seconds around a minute boundary (Bedrock allows 3 a minute). The human chose 1 rerank per 20 s window. Kept and recorded: see the `CLAUDE.md` Differences log. Review recorded (1 of 2).
 - Not run: the optional by-hand check against the real DynamoDB table.
 - `CLAUDE.md` updated: Differences log (6 Layer 6 entries), Status log with the Layer 7 settings, Open decisions (window and numbers settled). Walkthrough written: `walkthroughs/Project3/Layer6_Walkthrough.pdf` (Terms first, headless Edge). Layer 6 ready for the human's branch, commit and PR.
+- Layer 6 done: the human merged PR #31 (`4cbb9b2`). Explained on the way: the fixed window and how the server knows a request is the same user (the token's `sub`). Next: Layer 7 (deploy) when the human says so, in plan mode.
 
 ## 2026-11-21 — Session 36: Project 3 Layer 5 (login), build part
 
