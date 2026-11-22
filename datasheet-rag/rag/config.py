@@ -61,7 +61,26 @@ DOCUMENTS = {
     "esp32_datasheet_en": {"part": "ESP32", "revision": "Version 5.3",
                            "url": "https://documentation.espressif.com/esp32_datasheet_en.pdf"},
     "lm35": {"part": "LM35", "revision": "SNIS159H", "url": "https://www.ti.com/lit/ds/symlink/lm35.pdf"},
+    # AWS Prescriptive Guidance PDFs, added 2026-11-22 for the MCP demo (not datasheets; not in the 49-question
+    # evaluation). `revision` is the newest date in the guide's document history ("" when it has none). No url: the
+    # official download addresses were not checked, and the code treats a missing url as "no link".
+    # source "guide": stored with documents.source = 'guide', so a search with no document named reads them only
+    # where SEARCH_SOURCES includes "guide" (the MCP Lambda); the Project 2 site and evaluations never see them.
+    "agentic-ai-foundations": {"part": "AWS Agentic AI Foundations", "revision": "July 14, 2025", "url": None, "source": "guide"},
+    "agentic-ai-frameworks": {"part": "AWS Agentic AI Frameworks", "revision": "January 16, 2026", "url": None, "source": "guide"},
+    "agentic-ai-multitenant": {"part": "AWS Agentic AI Multi-tenant", "revision": "", "url": None, "source": "guide"},
+    "agentic-ai-patterns": {"part": "AWS Agentic AI Patterns", "revision": "July 14, 2025", "url": None, "source": "guide"},
+    "agentic-ai-serverless": {"part": "AWS Agentic AI Serverless", "revision": "January 9, 2026", "url": None, "source": "guide"},
+    "choosing-an-aws-vector-database-for-rag-use-cases": {"part": "AWS Vector Databases for RAG",
+                                                          "revision": "March 30, 2026", "url": None, "source": "guide"},
+    "rag-healthcare-use-cases": {"part": "AWS RAG for Healthcare", "revision": "March 14, 2025", "url": None, "source": "guide"},
+    "writing-best-practices-rag": {"part": "AWS RAG Writing Best Practices", "revision": "July 24, 2025", "url": None, "source": "guide"},
 }
+# The original four datasheets (stored as source 'curated'), which the evaluations, the Knowledge Base and the
+# Project 2 pages are built on.
+DATASHEET_DOCUMENTS = tuple(name for name, doc in DOCUMENTS.items() if doc.get("source", "curated") == "curated")
+if len(DATASHEET_DOCUMENTS) != 4:
+    raise RuntimeError(f"expected the four curated datasheets, found {DATASHEET_DOCUMENTS}")
 
 # Chunking. Size is counted in approximate tokens: characters divided by CHARS_PER_TOKEN, rounded up.
 CHARS_PER_TOKEN = 4
@@ -285,6 +304,14 @@ PG_PASSWORD = os.environ.get("PGPASSWORD", "")
 
 # Which database `db.connect()` reaches: "local" (the Docker Postgres above) or "aurora" (Cycle 2).
 DB_TARGET = os.environ.get("DB_TARGET", "local")
+
+# Which stored documents a search with no document named reads (`documents.source`), comma separated. Default
+# "curated": the four datasheets only (Project 2). The MCP Lambda sets "curated,guide" to add the AWS guides.
+# "upload" is never allowed here: an upload must not reach another visitor's search.
+SEARCH_SOURCE_NAMES = ("curated", "guide")
+SEARCH_SOURCES = tuple(s.strip() for s in os.environ.get("SEARCH_SOURCES", "curated").split(",") if s.strip())
+if not SEARCH_SOURCES or not set(SEARCH_SOURCES) <= set(SEARCH_SOURCE_NAMES):
+    raise RuntimeError(f"SEARCH_SOURCES must be some of {SEARCH_SOURCE_NAMES}, got {SEARCH_SOURCES!r}")
 
 # Aurora (Cycle 2). Identifiers from .env, not secrets: express clusters log in with IAM tokens.
 AURORA_HOST = os.environ.get("AURORA_HOST", "")

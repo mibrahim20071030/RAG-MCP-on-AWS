@@ -46,7 +46,8 @@ def test_first_option_is_all_datasheets():
 
 def test_datasheets_in_the_page_match_the_config():
     in_page = dict(options()[1:])
-    assert in_page == {name: entry["part"] for name, entry in config.DOCUMENTS.items()}
+    # The four datasheets only: the AWS guides (2026-11-22) are searched through the MCP tool, not this page.
+    assert in_page == {name: config.DOCUMENTS[name]["part"] for name in config.DATASHEET_DOCUMENTS}
 
 
 def test_loading_the_page_does_not_ask_the_api_for_the_list():
@@ -91,6 +92,7 @@ def test_review_page_datasheets_match_the_config():
     text = (config.WEB_DIR / "review.html").read_text(encoding="utf-8")
     block = re.search(r"const DOCUMENTS = \[(.*?)\];", text, re.DOTALL).group(1)
     found = dict(re.findall(r'\["([^"]+)", "([^"]+)"\]', block))
-    assert found == {name: entry["part"] for name, entry in config.DOCUMENTS.items()}
+    # The four datasheets only: the AWS guides (2026-11-22) are searched through the MCP tool, not this page.
+    assert found == {name: config.DOCUMENTS[name]["part"] for name in config.DATASHEET_DOCUMENTS}
     diagnoses = re.search(r"const DIAGNOSIS_TEXT = \{(.*?)\};", text, re.DOTALL).group(1)
     assert tuple(re.findall(r"^\s*(\w+):", diagnoses, re.MULTILINE)) == config.DIAGNOSES

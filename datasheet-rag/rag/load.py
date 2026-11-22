@@ -93,7 +93,7 @@ def load_document(conn, parsed: dict, strategy: str, embed_fn=embed.embed_texts)
     details = config.DOCUMENTS.get(document, {})
     with conn.transaction():
         document_id = db.upsert_document(conn, document, parsed.get("file"), details.get("part"),
-                                         details.get("revision"))
+                                         details.get("revision"), details.get("source", "curated"))
         stored = db.replace_chunks(conn, document_id, strategy, chunks, [vectors[h] for h in hashes])
     return {"document": document, "strategy": strategy, "chunks": stored, "embedded": len(missing)}
 

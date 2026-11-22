@@ -9,7 +9,8 @@ import pytest
 from rag import chunk, chunk_tables, chunk_text, config
 from rag.chunk_base import approx_tokens
 
-PARSED = sorted(config.PARSED_DIR.glob("*.json"))
+# The four datasheets only: the real-data checks expect datasheet tables (the AWS guides have none).
+PARSED = sorted(p for p in config.PARSED_DIR.glob("*.json") if p.stem in config.DATASHEET_DOCUMENTS)
 SIZED = {name: s["size"] for name, s in config.CHUNK_STRATEGIES.items() if s["size"] is not None}
 CHUNK_KEYS = {"document", "page", "page_label", "section", "kind", "text"}
 

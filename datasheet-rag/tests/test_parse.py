@@ -7,7 +7,8 @@ import pytest
 
 from rag import config, parse
 
-PDFS = sorted(config.PDF_DIR.glob("*.pdf"))
+# The four datasheets only: these checks are about datasheet PDFs (the AWS guides added 2026-11-22 are prose).
+PDFS = sorted(p for p in config.PDF_DIR.glob("*.pdf") if p.stem in config.DATASHEET_DOCUMENTS)
 PARSE_SOURCE = Path(parse.__file__)
 
 

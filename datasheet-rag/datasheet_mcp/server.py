@@ -17,7 +17,8 @@ from datasheet_mcp.limits import Limits
 from datasheet_mcp.tools import DatasheetName, Deps, SearchResult
 from rag import config, db, retrieve
 
-INSTRUCTIONS = "Search the datasheets of four hardware parts (STM32F205/207, TCTH0xxxE, ESP32, LM35)."
+INSTRUCTIONS = ("Search the datasheets of four hardware parts (STM32F205/207, TCTH0xxxE, ESP32, LM35) and eight AWS "
+                "Prescriptive Guidance guides on agentic AI and RAG.")
 
 
 def build_server(deps: Deps, **server_kwargs) -> MCPServer:
@@ -33,7 +34,7 @@ def build_server(deps: Deps, **server_kwargs) -> MCPServer:
     def search_datasheets(
         query: Annotated[str, Field(min_length=1, max_length=500,
                                     description="The question, or the key words to look for")],
-        datasheet: Annotated[DatasheetName, Field(description="Search one datasheet, or 'all'")] = "all",
+        datasheet: Annotated[DatasheetName, Field(description="Search one document, or 'all'")] = "all",
         num_results: Annotated[int, Field(ge=1, le=10, description="How many passages to return")] = 10,
     ) -> SearchResult:
         # The user id is needed only for the per-user limit; with limits off, no token check is added here.

@@ -14,7 +14,10 @@ pytestmark = pytest.mark.anyio
 
 TOOL = "search_datasheets"
 GENERIC_ERROR = "Error executing tool search_datasheets"
-PARTS = {"all", "STM32F205/207", "TCTH0xxxE", "ESP32", "LM35"}
+PARTS = {"all", "STM32F205/207", "TCTH0xxxE", "ESP32", "LM35",
+         "AWS Agentic AI Foundations", "AWS Agentic AI Frameworks", "AWS Agentic AI Multi-tenant",
+         "AWS Agentic AI Patterns", "AWS Agentic AI Serverless", "AWS Vector Databases for RAG",
+         "AWS RAG for Healthcare", "AWS RAG Writing Best Practices"}
 # Shaped like rag.config.DOCUMENTS; the revisions are made up so a test can tell they came from here.
 DOCUMENTS = {
     "lm35": {"part": "LM35", "revision": "TEST-REV-A"},

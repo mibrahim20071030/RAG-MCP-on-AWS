@@ -180,18 +180,23 @@ def vector_text(vector) -> str:
 
 
 def upsert_document(conn: psycopg.Connection, name: str, file: str | None = None, part: str | None = None,
-                    revision: str | None = None) -> int:
-    """Insert the document or update its details. A detail given as None keeps its stored value. Returns its id."""
+                    revision: str | None = None, source: str = "curated") -> int:
+    """Insert the document or update its details. A detail given as None keeps its stored value. `source` is
+    'curated' (a datasheet) or 'guide' (an AWS guide, searched only where SEARCH_SOURCES has it) and is always set.
+    Returns its id."""
+    if source not in config.SEARCH_SOURCE_NAMES:
+        raise ValueError(f"source must be one of {config.SEARCH_SOURCE_NAMES}, got {source!r}")
     row = conn.execute(
         """
-        INSERT INTO documents (name, file, part, revision) VALUES (%s, %s, %s, %s)
+        INSERT INTO documents (name, file, part, revision, source) VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (name) DO UPDATE SET
             file = COALESCE(EXCLUDED.file, documents.file),
             part = COALESCE(EXCLUDED.part, documents.part),
-            revision = COALESCE(EXCLUDED.revision, documents.revision)
+            revision = COALESCE(EXCLUDED.revision, documents.revision),
+            source = EXCLUDED.source
         RETURNING id
         """,
-        (name, file, part, revision),
+        (name, file, part, revision, source),
     ).fetchone()
     return row[0]
 
@@ -396,10 +401,14 @@ _HIT_KEYS = ("id", "document", "page", "page_label", "section", "kind", "text", 
 # Keyword search configuration -> the generated column built with it (tsv_english, tsv_simple in `_TABLES`).
 _TSV_COLUMNS = {name: f"tsv_{name}" for name in config.KEYWORD_CONFIGS}
 
-# Which documents a search reads: with no document named, only the curated datasheets, so an upload never reaches
-# another visitor's search or the evaluation; with one named, that document only, and an upload only until it expires.
-_DOCUMENT_FILTER = """(CASE WHEN %(document)s::text IS NULL THEN d.source = 'curated'
-      ELSE d.name = %(document)s AND (d.expires_at IS NULL OR d.expires_at > now()) END)"""
+# Which documents a search reads: with no document named, only the sources in config.SEARCH_SOURCES (default the
+# curated datasheets; the MCP Lambda adds the AWS guides), so an upload never reaches another visitor's search or the
+# evaluation; with one named, that document only, and an upload only until it expires. The source names are checked
+# against a fixed list in config, so writing them into the SQL text is safe.
+_SEARCH_SOURCES_SQL = ", ".join(f"'{s}'" for s in config.SEARCH_SOURCES if s in config.SEARCH_SOURCE_NAMES)
+_DOCUMENT_FILTER = """(CASE WHEN %(document)s::text IS NULL THEN d.source IN ({sources})
+      ELSE d.name = %(document)s AND (d.expires_at IS NULL OR d.expires_at > now()) END)""".replace(
+    "{sources}", _SEARCH_SOURCES_SQL)
 
 # The raw `<=>` stands alone in ORDER BY so that an index can serve it; the score is computed in SELECT only.
 _NEAREST_SQL = """

@@ -30,14 +30,14 @@ def prepare(out_dir: Path) -> int:
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
-    for document in config.DOCUMENTS:
+    for document in config.DATASHEET_DOCUMENTS:  # the KB holds the four datasheets only
         pdf = config.PDF_DIR / f"{document}.pdf"
         if not pdf.exists():
             raise SystemExit(f"Missing {pdf}")
         shutil.copyfile(pdf, out_dir / pdf.name)
         meta = out_dir / f"{pdf.name}.metadata.json"
         meta.write_text(json.dumps(sidecar(document), indent=2), encoding="utf-8")
-    return len(config.DOCUMENTS)
+    return len(config.DATASHEET_DOCUMENTS)
 
 
 def main() -> None:
