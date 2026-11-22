@@ -27,7 +27,10 @@ from mcp.server.auth.provider import AccessToken
 logger = logging.getLogger(__name__)
 
 REQUIRED_CLAIMS = ["exp", "iss", "sub", "client_id", "token_use"]
-JWKS_TIMEOUT_S = 5  # how long to wait for the key list; well inside the 28 s tool deadline
+# How long to wait for the key list (Layer 5 measured 0.4 s). The token check runs before the tool's 25 s deadline
+# starts, inside the 5 s the gateway's 30 s leaves for the cold start, the app build and this; the keys are fetched
+# once per Lambda instance and then cached.
+JWKS_TIMEOUT_S = 2
 LOGGED_VALUE_MAX = 64  # a client_id is cut to this length in a log line (it comes from the request)
 
 # Errors that mean this server is broken, not the token: the key list cannot be fetched, is empty or malformed, or a

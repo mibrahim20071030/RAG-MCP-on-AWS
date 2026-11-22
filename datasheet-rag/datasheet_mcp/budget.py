@@ -11,8 +11,37 @@ How a step uses it: first `require(minimum_s, message)`, then pass `cap(step_lim
 import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from mcp.server.mcpserver.exceptions import ToolError
+
+
+@dataclass(frozen=True)
+class Budget:
+    """The time budget of one tool call and the longest each slow step can take (Layer 7).
+
+    `connect_s` is the database connect's worst case (attempts x timeout, plus the pauses between attempts);
+    `bedrock_s` is one Bedrock call's (attempts x (connect timeout + read timeout)). The tool starts a step only when
+    its worst case fits in the time left, so a call ends close to `total_s` whatever the steps do. Not counted:
+    the usage counters (normally milliseconds; the rerank check adds the slot counter's worst case), the search
+    query after the connect (about 1 s; it has no timeout of its own) and the daily place given back at the end.
+
+    Refuses (ValueError) settings where a connect, a question embed and a rerank cannot all fit in `total_s`: a
+    missing or wrong Lambda setting (for example the local default of 3 connect attempts of 60 s) then stops the
+    server at its first call, instead of refusing every cold call or ending in the gateway's bare 504."""
+    total_s: float
+    connect_s: float
+    bedrock_s: float
+
+    def __post_init__(self):
+        for name in ("total_s", "connect_s", "bedrock_s"):
+            value = getattr(self, name)
+            if (not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(value)
+                    or value <= 0):
+                raise ValueError(f"{name} must be a finite number above 0, got {value!r}")
+        if self.connect_s + 2 * self.bedrock_s > self.total_s:
+            raise ValueError(f"the steps cannot fit in the {self.total_s} s budget: connect {self.connect_s} s + "
+                             f"embed {self.bedrock_s} s + rerank {self.bedrock_s} s; lower the timeouts or attempts")
 
 
 class Deadline:
@@ -37,12 +66,13 @@ class Deadline:
             raise ValueError(f"step_limit_s and margin_s must be finite and not negative, got {step_limit_s}, {margin_s}")
         return float(max(0.0, min(step_limit_s, self.remaining() - margin_s)))
 
-    def require(self, minimum_s: float, message: str) -> None:
+    def require(self, minimum_s: float, message: str, error: type[ToolError] = ToolError) -> None:
         """Refuse to start a step that needs at least `minimum_s` seconds when less than that is left.
 
         `minimum_s` should include the margin `cap` takes off, so a step that passes here gets at least what it
         needs from `cap`. `message` reaches Claude word for word: make it readable, with a retry hint, and never put
-        exception text or other internal detail in it.
+        exception text or other internal detail in it. `error` is the ToolError class raised (the tool passes
+        limits.NotPaid for steps before a paid call, so the daily place is given back).
         """
         if self.remaining() < minimum_s:
-            raise ToolError(message)
+            raise error(message)

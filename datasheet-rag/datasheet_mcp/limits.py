@@ -31,10 +31,13 @@ log = logging.getLogger(__name__)
 
 WINDOW_S = 60
 LOCAL_USER = "local"  # the one user when login is off (local runs only)
-THROTTLE_CODES = ("ThrottlingException", "TooManyRequestsException")  # as in rag.api._bedrock_error
+# As in rag.api._bedrock_error, plus ServiceUnavailableException (Layer 7): InvokeModel's 503 when the model is
+# briefly overloaded (the question embed; Rerank does not list it). A retry a minute later can fix each of them.
+THROTTLE_CODES = ("ThrottlingException", "TooManyRequestsException", "ServiceUnavailableException")
 
 BUSY = "The search service is busy right now. Try again in a minute."
-THROTTLED = "AWS is limiting calls to the search models right now. Wait a minute and search again."
+THROTTLED = ("AWS is limiting calls to the search models right now, or they are briefly overloaded. Wait a minute "
+             "and search again.")
 NO_USER = "Your login token has no user id, so the search limits cannot be applied. Log in again."
 # What a counter can raise: an AWS refusal, a network failure, or USAGE_TABLE unset (rag.usage._table).
 COUNTER_ERRORS = (ClientError, BotoCoreError, RuntimeError)
@@ -42,7 +45,8 @@ COUNTER_ERRORS = (ClientError, BotoCoreError, RuntimeError)
 
 class NotPaid(ToolError):
     """A refusal or failure after the daily place was taken but before a paid call was made, so the place goes
-    back: the rerank slot was refused, or Bedrock throttled the call."""
+    back: the rerank slot was refused, too little time was left for a paid step (Layer 7), or Bedrock throttled
+    the call."""
 
 
 def is_throttle(error: BaseException) -> bool:
@@ -144,23 +148,75 @@ class Limits:
             raise NotPaid(f"The reranker is busy (it allows {self.rerank_per_minute} new searches a minute for all "
                           f"users together). Wait about {wait_s} seconds and try again.")
 
-    def rerank_client(self, inner_factory: Callable[[], Any]) -> "SlotRerankClient | None":
+    def rerank_client(self, inner_factory: Callable[[], Any],
+                      before: Callable[[], None] | None = None) -> "SlotRerankClient | None":
         """The rerank client to pass to retrieve_passages: one that takes a slot before each paid call, or None
-        (retrieve uses its own client) when there is no rerank limit."""
-        if not self.rerank_per_minute:
+        (retrieve uses its own client) when there is no rerank limit and no `before`.
+
+        `before` (the tool's time check, Layer 7) runs before every paid request, and before the slot is taken, so
+        a call that would not fit in the time left uses no slot."""
+        take_slot = self.take_rerank_slot if self.rerank_per_minute else None
+        if take_slot is None and before is None:
             return None
-        return SlotRerankClient(self.take_rerank_slot, inner_factory)
+        return SlotRerankClient(take_slot, inner_factory, check=before)
+
+
+class QuickCounter:
+    """The functions of rag.usage the limits use, with a DynamoDB client that gives up quickly (Layer 7).
+
+    rag.usage's own client has botocore's defaults (60 s timeouts, up to 10 tries in the legacy retry mode), which
+    could hold a call past the gateway's 30 s. rag.usage takes a `client` argument, so it is not changed. A
+    counter that gives up raises a botocore error, which the limits turn into the "busy" refusal."""
+
+    CONNECT_TIMEOUT_S = 0.5
+    READ_TIMEOUT_S = 1.5
+    # No retry (botocore's `max_attempts` counts retries; checked on botocore 1.43.114, 2026-11-21): "add one" is not
+    # safe to send twice. A slow first try that did count would be counted again, or refused by its own count.
+    RETRIES = 0
+    WORST_S = CONNECT_TIMEOUT_S + READ_TIMEOUT_S  # one counter call at most (a call normally takes milliseconds)
+
+    window_left_s = staticmethod(usage.window_left_s)
+
+    def __init__(self, client: Any = None):
+        self._client = client
+
+    def client(self) -> Any:
+        if self._client is None:
+            import boto3
+            from botocore.config import Config
+
+            from rag import config
+
+            self._client = boto3.client("dynamodb", region_name=config.AWS_REGION, config=Config(
+                connect_timeout=self.CONNECT_TIMEOUT_S, read_timeout=self.READ_TIMEOUT_S,
+                retries={"max_attempts": self.RETRIES, "mode": "standard"}))
+        return self._client
+
+    def take_window(self, kind: str, key: str, limit: int, window_s: int = WINDOW_S, now: float | None = None):
+        return usage.take_window(kind, key, limit, window_s=window_s, now=now, client=self.client())
+
+    def take(self, kind: str, limit: int, day: date | None = None):
+        return usage.take(kind, limit, day=day, client=self.client())
+
+    def release(self, kind: str, day: date | None = None) -> None:
+        usage.release(kind, day=day, client=self.client())
 
 
 class SlotRerankClient:
     """A stand-in for the Bedrock client in rag.rerank. rag.rerank calls `rerank` only for texts whose scores are
     not in the cache, so a fully cached question never takes a slot. The real client is made only when needed."""
 
-    def __init__(self, take_slot: Callable[[], None], inner_factory: Callable[[], Any]):
+    def __init__(self, take_slot: Callable[[], None] | None, inner_factory: Callable[[], Any],
+                 check: Callable[[], None] | None = None):
+        """`take_slot` (None: no slot) runs once per query; `check` (the time check, Layer 7) before every request,
+        and before the slot."""
         self._take_slot = take_slot
         self._inner_factory = inner_factory
+        self._check = check
 
     def rerank(self, **request):
-        if "nextToken" not in request:  # a further page of the same query takes no second slot
+        if self._check is not None:
+            self._check()
+        if self._take_slot is not None and "nextToken" not in request:  # a further page takes no second slot
             self._take_slot()
         return self._inner_factory().rerank(**request)

@@ -11,3 +11,4 @@ mcp==2.3.0
 pydantic==2.14.4  # imported directly by datasheet_mcp; the version mcp 2.3.0 resolved to
 pyjwt[crypto]==2.15.1  # imported by datasheet_mcp/auth.py (Layer 5 token check); the version mcp 2.3.0 resolved to
 cryptography==50.0.2  # RS256 signatures for PyJWT; the tests also import it to make keys
+mangum==0.22.0  # mcp_handler.py (Layer 7): API Gateway events to the ASGI app; newest on PyPI 2026-11-21

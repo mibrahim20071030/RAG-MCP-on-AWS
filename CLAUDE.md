@@ -73,18 +73,19 @@ Design documents: `docs/project3/` (blueprint, code tour, tooling; local only).
 ### Unverified items (do not assert; test in the layer shown)
 
 - Which protocol version Claude sends at runtime: its docs describe the older `initialize` handshake (Layer 8: log the first requests).
-- Mangum plus per-call app build on real Lambda; `mcp` wheels for Python 3.14; zip size with the new `opentelemetry-api` dependency (Layer 7).
+- Mangum plus per-call app build on real Lambda (Layer 7). Settled 2026-11-21 in Docker on `public.ecr.aws/lambda/python:3.14`: Mangum 0.22.0 with a new app per call works; all Linux cp314 wheels exist; `mcp.zip` is 32.6 MB zipped, 74.8 MB unzipped. Still to measure on Lambda: the cold start (10.2 s in Docker through a Windows bind mount).
 - Cognito discovery accepted by Claude (Layer 8). Resource indicators settled locally in Layer 5: binding works when the scope belongs to a resource server named after the exact MCP URL (see Differences log); whether Claude sends `resource=` is Layer 8. Fallback: static header option.
-- How Claude shows a bare gateway 429 (Layer 7).
-- Gateway returns 404 for a method with no route (Layer 7).
+- How Claude shows a bare gateway 429 (Layer 8: not testable without Claude; the throttle is set, burst 5, rate 1/s).
+- Settled 2026-11-21 (Layer 7): the gateway returns 404 `{"message":"Not Found"}` for `GET /mcp` (no route) and the Lambda does not run.
 - The Request headers (static header) option on Ibrahim's account (Layer 8).
 - Inspector CLI flag names: run `--help` first and record what works here.
-- Whether Claude's requests to the server carry an `Origin` header (with `allowed_hosts` set, any Origin gets 403) (Layers 7 and 8: log the headers).
+- Whether Claude's requests to the server carry an `Origin` header (with `allowed_hosts` set, any Origin gets 403) (Layer 8). Layer 7 logs `origin_present` on every call; curl and urllib send none.
 
 ### Open decisions for Ibrahim
 
 - Structured result versus text-only (default structured; Layer 8 decides).
-- Gateway rate and burst (Layer 7).
+- Layer 8: Aurora woke in more than 19 s both times in Layer 7, so the first search after a pause gets "try again". Keep (Claude retries), or move time from Bedrock to the connect inside the 25 s budget.
+- Settled 2026-11-21 (Layer 7): gateway burst 5, rate 1/s on `POST /mcp` and the metadata GET.
 - Settled 2026-11-21 (Layer 6): fixed windows, not spacing; 3 per user a minute, 100 a day for all users, 3 paid reranks a minute shared.
 
 ### Differences log (fill after each layer)
@@ -120,6 +121,14 @@ Format: `Layer N, date: what differs from the reference design, and why.`
 - Layer 6, 2026-11-21: the daily place is given back when the database could not be reached, the rerank slot was refused or its counter failed (`NotPaid`), or Bedrock throttled. Kept (review nit): any other error after the connection keeps the place (a search SQL error, an AccessDenied from the embedder), as in Project 2's `ask()`; `NotPaid` assumes one paid rerank call per search (30 candidates, `RERANK_MAX_DOCS` 100).
 - Layer 6, 2026-11-21: counter failures (DynamoDB error, `USAGE_TABLE` unset) refuse the call: ERROR log with traceback, "service is busy" to Claude. Limit refusals are logged at INFO and throttles at WARNING with the code and request id (the SDK does not log a ToolError).
 - Layer 6, 2026-11-21: `Deadline` is still not wired (Layer 7, Aurora connect), because every Layer 6 check refuses at once. Known, not fixed (Project 2 module): a refused slot still stamps `rerank._last_call`, so locally (`RERANK_MIN_INTERVAL_S` 20) the next paid call waits; Lambda sets 0.
+- Layer 7, 2026-11-21: deadline 25 s, not 28 (Ibrahim chose this): the cold start, app build and token check run before the tool and count against the gateway's 30 s. `JWKS_TIMEOUT_S` 5 to 2 for the same reason (review).
+- Layer 7, 2026-11-21: no per-call `cap` on the connect and no `rag/db.py` change. Instead NEW `Budget(total_s, connect_s, bedrock_s)` reads each step's worst case from the settings (`server.real_budget`), and a step starts only when its worst case fits: connect, question embed (only when not cached), each rerank request (plus the slot counter's 2 s). Settings that cannot fit (connect + 2 Bedrock calls > 25 s) make the server refuse to run, so a missing Lambda setting fails loudly instead of ending in a 504 (code review). Not counted: the search SQL after the connect (about 1 s; a statement timeout needs SQL in `rag/db.py`) and the daily give-back at the end.
+- Layer 7, 2026-11-21: botocore's retries `max_attempts` counts retries, not tries (0 gives `total_max_attempts` 1; checked on botocore 1.43.114). So Project 2's Lambda value `BEDROCK_MAX_ATTEMPTS=2` is 3 tries (its `config.py` comment says "tries"; not changed). The MCP Lambda sets 0, and `real_budget` counts `+ 1`. Lambda settings changed from the plan to fit 25 s: `AURORA_CONNECT_TIMEOUT_S=19`, `BEDROCK_CONNECT_TIMEOUT_S=1`, `BEDROCK_READ_TIMEOUT_S=2` (19 + 3 + 3). libpq's 2 s minimum is counted.
+- Layer 7, 2026-11-21 (review): NEW `limits.QuickCounter` passes its own DynamoDB client (0.5 s connect, 1.5 s read, no retry, because "add one" is not safe to send twice) to `rag.usage`, which takes a `client` argument; `rag/usage.py` unchanged. `rag.usage`'s own client keeps botocore's defaults for Project 2.
+- Layer 7, 2026-11-21: readable errors added beyond the reference design: database did not answer (`DB_NOT_READY`, place back); a login, certificate or host-name fault (`DB_SETUP`, logged at ERROR, place back); Bedrock unreachable (place back) or its answer cut short (read timeout, connection closed; place kept, it may be billed). `ServiceUnavailableException` joins the throttle codes (Ibrahim chose this); it is an InvokeModel code (the embed), Rerank does not list it. Not added: `ModelNotReadyException`, Rerank's `InternalServer`/`BadGateway`/`DependencyFailed` (generic error).
+- Layer 7, 2026-11-21: one setting, `MCP_PUBLIC_URL`, gives both the metadata URL and the one allowed Host; `load_setup` refuses login off, non-https, a port, user info, capitals, or a path other than `/mcp`. A wrong Host without a token gets 401, not 421: the SDK checks the token first (Docker run). The setup is made once per Lambda instance (key cache kept); the app is built per call.
+- Layer 7, 2026-11-21: `build/mcp.zip` is built from the exact `.venv` versions with Linux markers and `--no-deps` (NEW `linux_closure`), because pip's `--platform` still judges markers on Windows and asked for `pywin32` (from `mcp`). `pinned()` now cuts `# comments` after a pin. The Project 2 zips are built as before.
+- Layer 7, 2026-11-21: kept (review): a rerank refused after a paid question embed still gives the daily place back (about $0.000002; Layer 6 rule). A Bedrock `nextToken` page is time-checked but takes no second slot.
 
 ### Status log
 
@@ -160,14 +169,24 @@ Format: `Layer N, date: what differs from the reference design, and why.`
   - `rag/usage.py`: NEW `take_window`, `window_left_s` (`take` and `take_window` share `_count_one`). NEW `datasheet_mcp/limits.py`; `tools.run_search` and `server.py` wired (order: blank query, per-user, daily, connect, search, rerank slot before a paid call).
   - Tests: NEW `tests/test_mcp_limits.py` (64), `tests/test_usage.py` window tests, `tests/test_mcp_auth.py` two-token test. Checks: 1,607 passed; ruff clean. No AWS call made; the by-hand DynamoDB check was not run.
   - Review (built-in `/code-review`, `silent-failure-hunter`, `pr-test-analyzer`): fixes in the Differences log. Review recorded (1 of 2).
-  - For Layer 7: set `MCP_USER_PER_MINUTE=3`, `MCP_DAILY_LIMIT=100`, `MCP_RERANK_PER_MINUTE=3`, `USAGE_TABLE`, `RERANK_MIN_INTERVAL_S=0` and a low `BEDROCK_MAX_ATTEMPTS` (default 10 adaptive retries can outlast the 28 s deadline) on the MCP Lambda; the role needs `dynamodb:UpdateItem` on the usage table; DynamoDB TTL on `expires_at` cleans up window items. Decide whether `ServiceUnavailableException` also becomes a readable retry error. If `deps.connect()` ever makes an AWS call, narrow the throttle `try` so its errors are not called "search models".
+  - For Layer 7 (done in the Layer 7 code and `runs/mcp_deploy.md`): set `MCP_USER_PER_MINUTE=3`, `MCP_DAILY_LIMIT=100`, `MCP_RERANK_PER_MINUTE=3`, `USAGE_TABLE`, `RERANK_MIN_INTERVAL_S=0` and a low `BEDROCK_MAX_ATTEMPTS` (default 10 adaptive retries can outlast the 28 s deadline) on the MCP Lambda; the role needs `dynamodb:UpdateItem` on the usage table; DynamoDB TTL on `expires_at` cleans up window items. Decide whether `ServiceUnavailableException` also becomes a readable retry error. If `deps.connect()` ever makes an AWS call, narrow the throttle `try` so its errors are not called "search models".
+
+- Layer 7, 2026-11-21 (deployed and tested; waiting for Ibrahim's commit, PR and merge):
+  - Deployed tests passed (`scripts/mcp_login.py --deployed`, with and without `--resource`): no token 401 with `resource_metadata` naming `https://m6xvt7cua7.execute-api.us-east-1.amazonaws.com/...`; metadata 200; real Cognito login, search 200 (LM35, pages 10, 4, 7) in 2.5 s, 0.4 s warm; binding token (`aud` = the MCP URL) accepted; the 4th search of the minute got the readable limit text; `GET /mcp` gateway 404 with no Lambda run; one JSON log line per call, refusals at INFO, no token in the log. Cold (12 min idle): 23.6 s round trip (init 2.5 s, connect 19 s to its limit) ending with the readable `DB_NOT_READY`, never a 504; the retry 30 s later took 1.1 s. Aurora took more than 19 s to wake both times seen: the first search after a pause usually gets "try again" (Layer 8 decides whether to rebalance the budget). Init 2.5 to 3.3 s; 155 to 178 MB used. Spend: $0.002 (one rerank) plus Aurora wake time.
+  - Console problems met (all fixed by Ibrahim): runtime Python 3.15 (the cp314 `pydantic_core` did not load: `cannot import name 'ArgsKwargs'`); `MCP_COGNITO_ISSUER` not the full URL; `MCP_PUBLIC_URL`/`MCP_SCOPE` with the account ID instead of the API ID; `AURORA_HOST` the cluster name, not the endpoint (`failed to resolve host`, now in `SETUP_FAULTS`); the role's `rds-db:connect` ARN wrong (`PAM authentication failed`); the guide's throttle example named a removed route (`NotFoundException`, nothing changed).
+  - Walkthrough: `walkthroughs/Project3/Layer7_Walkthrough.pdf`.
+- Layer 7, 2026-11-21 (code part, built and reviewed):
+  - NEW `mcp_handler.py`, `datasheet_mcp/budget.py` `Budget`, `limits.QuickCounter`, `server.real_budget`; `tools.run_search` deadline and readable errors; `scripts/build_lambda.py` `build/mcp.zip` (`linux_closure`); `scripts/mcp_login.py --server --scope --deployed`. Tests: NEW `tests/test_mcp_handler.py`, `tests/test_build_lambda.py`, more in `tests/test_mcp_limits.py`. Checks: 1,683 passed; ruff clean.
+  - Review (built-in `/code-review` twice, 2 of 2 recorded; `silent-failure-hunter`; `pr-test-analyzer`): fixes in the Differences log.
+  - Console guide: `datasheet-rag/runs/mcp_deploy.md`. Run the deployed checks with `.venv\Scripts\python.exe scripts\mcp_login.py --server <MCP_API_URL> --scope <MCP_API_URL>/mcp/search --deployed` (and with `--resource <MCP_API_URL>/mcp`).
+  - Layer 8 teardown adds: Lambda `datasheet-mcp`, its log group, role `datasheet-mcp-lambda`, the dev user's `mcp-lambda-logs` policy, the two gateway routes, their integration and route settings, the `datasheet-mcp-deployed` resource server.
 
 ## Environment notes (both projects)
 
 - The human works on Windows with PowerShell. Use PowerShell-compatible commands. Activate the virtual environment with `.venv\Scripts\Activate.ps1`.
 - The project path contains spaces. Quote paths in commands.
 - The code and its virtual environment live in `datasheet-rag/` (`datasheet-rag\.venv`, Python 3.14.6). Run tests from `datasheet-rag/` and the checks from the repo root: `datasheet-rag\.venv\Scripts\python.exe tools\checks.py`.
-- Project 3 packages: `mcp==2.3.0` installed (Layer 2; it brings PyJWT); `pyjwt[crypto]==2.15.1` and `cryptography==50.0.2` pinned in Layer 5; Mangum not yet. Each is installed in the layer that first needs it, then added to `datasheet-rag/requirements.txt` and the CI install line. Lambda runs Python 3.14: check that `mcp` has wheels for it (Layer 7).
+- Project 3 packages: `mcp==2.3.0` installed (Layer 2; it brings PyJWT); `pyjwt[crypto]==2.15.1` and `cryptography==50.0.2` pinned in Layer 5; `mangum==0.22.0` in Layer 7. Each is installed in the layer that first needs it, then added to `datasheet-rag/requirements.txt` and the CI install line. Lambda runs Python 3.14: check that `mcp` has wheels for it (Layer 7).
 - The Project 3 design documents (`Project3_blueprint.pdf`, `Project3_code_tour.pdf`, `Project3_tooling_new.pdf`) are in `docs/project3/`. They are gitignored (personal study material; `tools/checks.py` also blocks committing PDFs), so they exist only on this machine.
 - Never write the database password or AWS keys into any file in the repo, into `CLAUDE.md`, or into a chat message. Read the local database password from an environment variable or a `.env` file listed in `.gitignore`.
 - Never create IAM users, access keys, or other credentials on the human's behalf. Tell the human what to create in the console, and what permissions it needs.

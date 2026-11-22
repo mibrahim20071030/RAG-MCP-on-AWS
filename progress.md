@@ -30,6 +30,12 @@ Project 3 (remote MCP server), Layer 0:
 - [x] 2026-11-21: Layer 6 decisions: fixed windows; 3 per user a minute / 100 a day / 3 reranks a minute; daily place given back when nothing was paid; rerank slot 1 per 20 s (after the review).
 - [ ] Read `walkthroughs/Project3/Layer6_Walkthrough.pdf`.
 - [x] 2026-11-21: Layer 6 committed, PR #31 merged (`4cbb9b2`).
+- [x] 2026-11-21: Layer 7 plan approved (25 s deadline; throttle 5 / 1; new role; ServiceUnavailable readable).
+- [ ] Layer 7: make the branch (for example `git switch -c project-3-layer-7`).
+- [x] 2026-11-21: Layer 7 console steps done (plus fixes: runtime 3.14, issuer, API ID in the URL and scope, `AURORA_HOST`, the `rds-db:connect` ARN, the throttle command).
+- [x] 2026-11-21: Layer 7 deployed tests approved and passed (about $0.002 plus Aurora).
+- [ ] Read `walkthroughs/Project3/Layer7_Walkthrough.pdf`.
+- [ ] Layer 7: commit, push, PR, CI green, merge.
 
 Project 2 (Cycle 2):
 
@@ -220,6 +226,22 @@ Cycle 2 (deploy, UI, report):
   2026-11-10), `/api/ask` throttle rate 0.5, burst 10 (set by the human; the dev user cannot read API Gateway).
 - [ ] 10c. After the LinkedIn traffic: put both caps back to 50 and the `/api/ask` throttle back to rate 0.05, burst 3.
 - [ ] 11. Teardown checklist (including the Knowledge Base and feedback-loop resources), then confirm in Billing that spend has stopped. Wait until the LinkedIn traffic is over.
+
+## 2026-11-21 — Session 38: Project 3 Layer 7 (deploy), code part
+
+- Plan approved (single agent). Decisions by the human: deadline 25 s (not 28: a cold start runs before the tool); gateway throttle burst 5, rate 1/s on both new routes; new IAM role `datasheet-mcp-lambda`; Bedrock `ServiceUnavailableException` becomes the readable retry error.
+- NEW `mcp_handler.py` (Mangum 0.22.0, app built per call, setup once per instance; refuses login off and an `MCP_PUBLIC_URL` that is not `https://<lower-case host>/mcp`; one JSON log line per call with the MCP headers, `origin_present`, user agent, JSON-RPC method; no token or query). NEW `Budget` in `datasheet_mcp/budget.py`; `tools.run_search` checks the deadline before the connect, the question embed and the paid rerank (every page, slot counter time included); readable errors for a database that does not answer, a database setup fault, Bedrock unreachable (place back) and a Bedrock answer cut short (place kept). NEW `limits.QuickCounter` (DynamoDB client with 0.5 s / 1.5 s timeouts and no retry; `rag/usage.py` unchanged). `server.real_budget` reads the worst cases from the settings and refuses settings that do not fit in 25 s. `JWKS_TIMEOUT_S` 5 to 2.
+- `scripts/build_lambda.py`: third zip `build/mcp.zip` (32.6 MB zipped, 74.8 MB unzipped, 38 packages). Problem 1: `pinned()` passed `# comment` text to pip (the Project 3 lines have comments); fixed. Problem 2: pip asked for `pywin32` for the Linux zip, because `--platform` does not change how markers like `sys_platform == "win32"` are judged; fixed with `linux_closure` (the exact `.venv` versions, Linux markers, `--no-deps`). `mangum==0.22.0` pinned (requirements and CI).
+- Problem 3 (found in review 2's follow-up): botocore's `max_attempts` counts retries, so Project 2's `BEDROCK_MAX_ATTEMPTS=2` is 3 tries. The MCP Lambda sets 0 (one try); `real_budget` counts `+ 1`.
+- Docker run of the unpacked zip in `public.ecr.aws/lambda/python:3.14` (free, placeholder settings): 401 with `resource_metadata`, metadata 200, repeated calls fine; without the time settings the function refuses ("cannot fit in the 25.0 s budget"). A wrong Host without a token gets 401, not 421 (the SDK checks the token first). Init took 10.2 s in Docker (files read through a Windows bind mount); the real cold start is measured on Lambda.
+- Tests: NEW `tests/test_mcp_handler.py`, `tests/test_build_lambda.py`, deadline and timeout tests in `tests/test_mcp_limits.py`. Checks: secrets ok, ruff ok, 1,683 passed.
+- Review: built-in `/code-review` twice (2 of 2 recorded), `silent-failure-hunter`, `pr-test-analyzer`. Fixes listed in the `CLAUDE.md` Differences log. Kept: the search SQL after the connect has no timeout (needs SQL in `rag/db.py`); a refused rerank after a paid embed still gives the daily place back.
+- Console work started by the human. Problem: the guide's `update-stage` example named `GET /api/documents` (removed in Project 2 step 7b), so AWS refused the whole command (`NotFoundException`, nothing changed); the example would also have reset `POST /api/ask` to 3 / 0.05, while it is at 10 / 0.5 until step 10c. Guide fixed: copy the routes from `get-stage` as they are, then add the two new ones.
+- Console fixes found by the free checks and the console Test: invoke permission was in place; the runtime was Python 3.15 (the cp314 `pydantic_core` would not load: `cannot import name 'ArgsKwargs'`), set to 3.14; `MCP_COGNITO_ISSUER` was not a full https URL; `MCP_PUBLIC_URL`/`MCP_SCOPE` used the account ID instead of the API ID `m6xvt7cua7`. After those: no token 401 with the right `resource_metadata`, metadata 200, `GET /mcp` 404, cold start about 3.2 s init (4.1 s round trip).
+- Deployed test 1, first run: the real login and the token check passed; the search got the readable database error in 1.0 s because `AURORA_HOST` was the cluster name `datasheet-rag` (`failed to resolve host`). Code fix: psycopg 3's "failed to resolve host" added to `SETUP_FAULTS` (it was reported as "did not answer"); test added; `mcp.zip` rebuilt (32,559,304 bytes). The human fixed `AURORA_HOST` and uploaded the zip. Next problem: `PAM authentication failed for user "rag_app"` (twice, the second time with Aurora awake), so the role's `rds-db:connect` ARN was wrong; the human copied the working ARN from `datasheet-rag-runtime`.
+- Deployed tests passed: test 1 (search 200 in 2.5 s, pages 10, 4, 7; the 4th search of the minute refused with the readable limit text; `GET /mcp` 404) and test 2 with `--resource` (`aud` in the token, accepted; 0.4 s warm). Log: one JSON line per call, refusals at INFO, no token, one cost line ($0.002 rerank); init 3.1 to 3.3 s. Cold test (12 min idle): 23.6 s round trip (init 2.5 s, connect 19 s to its limit) with the readable "did not answer in time", no 504; retry 1.1 s. Aurora woke in more than 19 s both times seen; left as a Layer 8 decision. Spend: $0.002 plus Aurora wake time.
+- Checks after the last fix: secrets ok, ruff ok, 1,684 passed. Walkthrough written: `walkthroughs/Project3/Layer7_Walkthrough.pdf` (Terms first, headless Edge). `CLAUDE.md` Status log, unverified items and open decisions updated. Layer 7 ready for the human's branch, commit and PR.
+- NEW console guide `datasheet-rag/runs/mcp_deploy.md`. `CLAUDE.md` updated: Differences log (9 Layer 7 entries), Status log, unverified items (wheels, zip size, Mangum in Docker), open decisions (gateway throttle settled). Still open: the human's console steps, then the deployed tests (cost printed first), the walkthrough PDF, and the branch, commit and PR.
 
 ## 2026-11-21 — Session 37: Project 3 Layer 6 (limits)
 
