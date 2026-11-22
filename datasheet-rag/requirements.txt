@@ -9,3 +9,5 @@ ruff==0.17.0
 # Project 3 (MCP server). Pure-Python wheel; pulls in pydantic, starlette, uvicorn, pyjwt, opentelemetry-api.
 mcp==2.3.0
 pydantic==2.14.4  # imported directly by datasheet_mcp; the version mcp 2.3.0 resolved to
+pyjwt[crypto]==2.15.1  # imported by datasheet_mcp/auth.py (Layer 5 token check); the version mcp 2.3.0 resolved to
+cryptography==50.0.2  # RS256 signatures for PyJWT; the tests also import it to make keys
