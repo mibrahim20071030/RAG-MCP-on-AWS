@@ -26,7 +26,7 @@ Project 3 (remote MCP server), Layer 0:
 - [x] 2026-11-21: Layer 5 plan approved (new pool `datasheet-mcp`; `validate_token_resource=False`).
 - [x] 2026-11-21: Layer 5 Cognito console work done (plus resource server `mcp-local` for the binding test); real login passed.
 - [ ] Read `walkthroughs/Project3/Layer5_Walkthrough.pdf`.
-- [ ] Layer 5: make branch `project-3-layer-5` (the uncommitted work moves with it), commit, push, PR, CI green, merge.
+- [x] 2026-11-21: Layer 5 committed on `project-3-layer-5`, PR #30 merged (`8eb7498`).
 - [ ] Before Layer 6: decide the open items in `CLAUDE.md`, "Open decisions for Ibrahim".
 
 Project 2 (Cycle 2):
@@ -231,6 +231,7 @@ Cycle 2 (deploy, UI, report):
 - Problem: with `--resource http://localhost:8000/mcp`, Cognito refused the login (`invalid_target`). Why: a bound token's custom scope must belong to a resource server whose identifier is that URL. The human added resource server `mcp-local` (identifier `http://localhost:8000/mcp`, scope `search`); with `MCP_SCOPE=http://localhost:8000/mcp/search` the token had `aud = http://localhost:8000/mcp` and the search returned 200. Layer 7 needs a resource server named after the deployed URL.
 - Review: built-in `/code-review` (7 nits), `silent-failure-hunter`, `pr-test-analyzer`. Fixed: server faults give 500 not 401 (also a missing `cryptography`), key lookup in a worker thread, `aud` trailing slash, spaces in settings refused, issuer and scope checked against the verifier, INFO logs on in `main()`, `client_id` cut in logs, readable errors in `mcp_login.py`; 28 tests added. Kept: missing scope gives 401 (test list). Layer 7 notes in `CLAUDE.md`. Checks: 1,530 passed. Real key list fetched in a thread (0.4 s). Review recorded (1 of 2).
 - Layer 5 walkthrough written: `walkthroughs/Project3/Layer5_Walkthrough.pdf`, 6 pages (Terms first), made from HTML with headless Edge. Layer 5 ready for the human's branch, commit and PR.
+- Layer 5 done: the human merged PR #30 (`8eb7498`). Afterwards, at the human's request, the walkthrough got section 10, "Cognito and tokens from the beginning" (token, claims, `aud`, the `resource` rule); 9 pages. Next: Layer 6 (limits, single agent) when the human says so, in plan mode; decide the open items in `CLAUDE.md` first.
 
 ## 2026-11-21 — Session 35: Project 3 Layer 4 (HTTP app, locally)
 
