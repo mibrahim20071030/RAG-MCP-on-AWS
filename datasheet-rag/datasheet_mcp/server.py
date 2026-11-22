@@ -11,7 +11,8 @@ from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from datasheet_mcp import tools
+from datasheet_mcp import limits, tools
+from datasheet_mcp.limits import Limits
 from datasheet_mcp.tools import DatasheetName, Deps, SearchResult
 from rag import config, db, retrieve
 
@@ -30,14 +31,33 @@ def build_server(deps: Deps, **server_kwargs) -> MCPServer:
         datasheet: Annotated[DatasheetName, Field(description="Search one datasheet, or 'all'")] = "all",
         num_results: Annotated[int, Field(ge=1, le=10, description="How many passages to return")] = 10,
     ) -> SearchResult:
-        return tools.run_search(query, datasheet, num_results, deps)
+        # The user id is needed only for the per-user limit; with limits off, no token check is added here.
+        user = limits.current_user() if deps.limits is not None else limits.LOCAL_USER
+        return tools.run_search(query, datasheet, num_results, deps, user=user)
 
     return mcp
 
 
+def real_limits() -> Limits | None:
+    """The limits set in rag/config.py (MCP_USER_PER_MINUTE, MCP_DAILY_LIMIT, MCP_RERANK_PER_MINUTE), or None
+    when all three are 0 (the local default).
+
+    Refuses to start (ValueError) when deployed with any of them 0, so a setting left out of the Lambda cannot open
+    the public endpoint to unlimited paid calls, and when a limit is set without USAGE_TABLE, so a setup mistake
+    is not reported to Claude as a brief "busy" on every call."""
+    values = (config.MCP_USER_PER_MINUTE, config.MCP_DAILY_LIMIT, config.MCP_RERANK_PER_MINUTE)
+    if config.DEPLOYED and not all(values):
+        raise ValueError("deployed, MCP_USER_PER_MINUTE, MCP_DAILY_LIMIT and MCP_RERANK_PER_MINUTE must all be set "
+                         f"above 0 (got {values})")
+    if any(values) and not config.USAGE_TABLE:
+        raise ValueError("an MCP limit is set but USAGE_TABLE is empty: the limits are counted in that table")
+    return Limits(*values) if any(values) else None
+
+
 def real_deps() -> Deps:
-    """The real database and retrieval (config.DB_TARGET picks the local database or Aurora)."""
-    return Deps(connect=db.connect, retrieve=retrieve.retrieve_passages, documents=config.DOCUMENTS)
+    """The real database and retrieval (config.DB_TARGET picks the local database or Aurora), and the limits."""
+    return Deps(connect=db.connect, retrieve=retrieve.retrieve_passages, documents=config.DOCUMENTS,
+                limits=real_limits())
 
 
 def main() -> None:

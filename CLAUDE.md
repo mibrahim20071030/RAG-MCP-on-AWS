@@ -83,9 +83,9 @@ Design documents: `docs/project3/` (blueprint, code tour, tooling; local only).
 
 ### Open decisions for Ibrahim
 
-- Fixed one-minute window versus spacing for the per-user counter.
 - Structured result versus text-only (default structured; Layer 8 decides).
-- The numbers: per-user per minute, daily cap, gateway rate and burst.
+- Gateway rate and burst (Layer 7).
+- Settled 2026-11-21 (Layer 6): fixed windows, not spacing; 3 per user a minute, 100 a day for all users, 3 paid reranks a minute shared.
 
 ### Differences log (fill after each layer)
 
@@ -112,6 +112,14 @@ Format: `Layer N, date: what differs from the reference design, and why.`
 - Layer 5, 2026-11-21: a new Cognito pool `datasheet-mcp`, not Project 2's `datasheet-rag-review` (Ibrahim chose this, 2026-11-21). It has a public SPA client `datasheet-mcp-client`, resource servers `datasheets` (scope `datasheets/search`) and `http://localhost:8000/mcp` (scope `http://localhost:8000/mcp/search`, for the binding test), and callbacks `http://localhost:8765/callback` and `https://claude.ai/api/mcp/auth_callback`.
 - Layer 5, 2026-11-21: the real login is NEW `scripts/mcp_login.py` (PKCE in the browser, token kept in memory; proposal by Claude, in the approved plan), not the Inspector.
 - Layer 5, 2026-11-21 (settles part of the "resource indicators" item): resource binding works only when the requested custom scope belongs to a resource server whose identifier is the exact MCP URL. With `resource=http://localhost:8000/mcp` and scope `datasheets/search`, Cognito refused the login: `invalid_target ... custom scopes requested for resource-binding must be assigned to the resource being requested`. With scope `http://localhost:8000/mcp/search`, the token had `aud = http://localhost:8000/mcp` and the call returned 200. For Layer 7: a client that sends `resource=` (the MCP auth spec asks clients to) will fail with the `datasheets` scope, so the deployed pool needs a resource server with the API's `/mcp` URL as its identifier, and `MCP_SCOPE=<that URL>/search`. Whether Claude sends `resource=` is still Layer 8.
+
+- Layer 6, 2026-11-21: the rerank slot is taken by NEW `SlotRerankClient`, passed to `retrieve_passages` as `rerank_client`, not by a check inside retrieval. Why: `rag.rerank` calls the client only for texts with no cached score, so the slot lands exactly before a paid call, and `rag/rerank.py` and `rag/retrieve.py` stay unchanged (Project 2 tests untouched). A `nextToken` page takes no second slot. The real client is `rerank._bedrock` (a private name used across packages), made only for a paid call (proposal by Claude, in the approved plan).
+- Layer 6, 2026-11-21: the rerank slot is 1 call per window of `ceil(60 / MCP_RERANK_PER_MINUTE)` seconds (20 s for 3), not 3 per minute. Why: the code review found that a fixed minute lets 3 calls out at :58 and 3 more at :01, 6 within seconds, more than the account's 3 a minute; with 20 s windows at most 2 go out close together, about 4 in any 60 s (Ibrahim chose this, 2026-11-21). The per-user count keeps the fixed minute.
+- Layer 6, 2026-11-21: the limit settings are in `rag/config.py` (`MCP_USER_PER_MINUTE`, `MCP_DAILY_LIMIT`, `MCP_RERANK_PER_MINUTE`, `USAGE_WINDOW_KEEP_S` = 300), beside `USAGE_TABLE` and the Project 2 caps, though the layer table names only `rag/usage.py` (proposal by Claude, in the approved plan). 0 is off locally. `server.real_limits()` refuses to start (ValueError) when deployed with any of them 0, or with a limit set and `USAGE_TABLE` empty (review).
+- Layer 6, 2026-11-21: the user key is the token's `sub`, or `local` when login is off; it is read only when limits are on. A token without `sub` is refused with a ToolError. Not done (review, medium): passing "login is on" into the tool so a lost token context with login on is an error instead of the shared `local` key; covered instead by the HTTP test that two `sub`s get separate counts.
+- Layer 6, 2026-11-21: the daily place is given back when the database could not be reached, the rerank slot was refused or its counter failed (`NotPaid`), or Bedrock throttled. Kept (review nit): any other error after the connection keeps the place (a search SQL error, an AccessDenied from the embedder), as in Project 2's `ask()`; `NotPaid` assumes one paid rerank call per search (30 candidates, `RERANK_MAX_DOCS` 100).
+- Layer 6, 2026-11-21: counter failures (DynamoDB error, `USAGE_TABLE` unset) refuse the call: ERROR log with traceback, "service is busy" to Claude. Limit refusals are logged at INFO and throttles at WARNING with the code and request id (the SDK does not log a ToolError).
+- Layer 6, 2026-11-21: `Deadline` is still not wired (Layer 7, Aurora connect), because every Layer 6 check refuses at once. Known, not fixed (Project 2 module): a refused slot still stamps `rerank._last_call`, so locally (`RERANK_MIN_INTERVAL_S` 20) the next paid call waits; Lambda sets 0.
 
 ### Status log
 
@@ -148,6 +156,11 @@ Format: `Layer N, date: what differs from the reference design, and why.`
   - Review (built-in `/code-review`: 7 nits; `silent-failure-hunter`; `pr-test-analyzer`): fixes in the Differences log; 28 tests added (90 in `tests/test_mcp_auth.py`), including a key-list outage over HTTP giving 500 and the real key lookup with a fake `PyJWKClient`. Checks: 1,530 passed; ruff clean. Real key list fetched in a worker thread (0.4 s). Review recorded (1 of 2).
   - For Layer 7 (from the review, not built now): build the `CognitoVerifier` once per Lambda instance (module level), because a new one per call loses the key cache and downloads the keys on every call; the handler must refuse to start when the login settings are missing (`login_from_env()` returns `None`, which means login off); set `MCP_PUBLIC_URL` (its default is localhost); set the Lambda log level so the INFO refusal lines reach CloudWatch; add a resource server named after the API's `/mcp` URL (see the binding finding). Layer 8 teardown: the `datasheet-mcp` pool, both resource servers and the localhost callback.
   - Run: start the server with `.venv\Scripts\python.exe -m datasheet_mcp.app` (login is on when `MCP_COGNITO_ISSUER` is in `.env`), then `.venv\Scripts\python.exe scripts\mcp_login.py [--resource <url>]`. Console guide: `datasheet-rag/runs/mcp_cognito_setup.md`.
+- Layer 6, 2026-11-21 (built; waiting for Ibrahim's branch, commit, PR and merge):
+  - `rag/usage.py`: NEW `take_window`, `window_left_s` (`take` and `take_window` share `_count_one`). NEW `datasheet_mcp/limits.py`; `tools.run_search` and `server.py` wired (order: blank query, per-user, daily, connect, search, rerank slot before a paid call).
+  - Tests: NEW `tests/test_mcp_limits.py` (64), `tests/test_usage.py` window tests, `tests/test_mcp_auth.py` two-token test. Checks: 1,607 passed; ruff clean. No AWS call made; the by-hand DynamoDB check was not run.
+  - Review (built-in `/code-review`, `silent-failure-hunter`, `pr-test-analyzer`): fixes in the Differences log. Review recorded (1 of 2).
+  - For Layer 7: set `MCP_USER_PER_MINUTE=3`, `MCP_DAILY_LIMIT=100`, `MCP_RERANK_PER_MINUTE=3`, `USAGE_TABLE`, `RERANK_MIN_INTERVAL_S=0` and a low `BEDROCK_MAX_ATTEMPTS` (default 10 adaptive retries can outlast the 28 s deadline) on the MCP Lambda; the role needs `dynamodb:UpdateItem` on the usage table; DynamoDB TTL on `expires_at` cleans up window items. Decide whether `ServiceUnavailableException` also becomes a readable retry error. If `deps.connect()` ever makes an AWS call, narrow the throttle `try` so its errors are not called "search models".
 
 ## Environment notes (both projects)
 

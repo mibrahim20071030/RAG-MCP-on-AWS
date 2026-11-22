@@ -117,3 +117,68 @@ def test_a_limit_without_a_table_is_refused(monkeypatch):
     monkeypatch.setattr(config, "USAGE_TABLE", "")
     with pytest.raises(RuntimeError, match="USAGE_TABLE"):
         usage.take("asks", 5, DAY, FakeDynamo())
+
+
+# Window counters (Project 3 Layer 6)
+
+NOW = 1_800_000_030.0  # 30 s into window 30_000_000 of 60 s
+
+
+def test_take_window_counts_up_to_the_limit_then_refuses(dynamo):
+    assert [usage.take_window("mcp-user", "u1", 3, now=NOW, client=dynamo) for _ in range(3)] == [1, 2, 3]
+    assert usage.take_window("mcp-user", "u1", 3, now=NOW + 29, client=dynamo) is None
+    assert usage.take_window("mcp-user", "u1", 3, now=NOW + 29, client=dynamo) is None
+    assert dynamo.items["mcp-user#u1#30000000"]["n"] == {"N": "3"}  # a refused take is not counted
+
+
+def test_the_next_window_starts_again(dynamo):
+    for _ in range(3):
+        usage.take_window("mcp-user", "u1", 3, now=NOW, client=dynamo)
+    assert usage.take_window("mcp-user", "u1", 3, now=NOW + 30, client=dynamo) == 1  # 1_800_000_060: next window
+    assert set(dynamo.items) == {"mcp-user#u1#30000000", "mcp-user#u1#30000001"}
+
+
+def test_window_keys_and_kinds_are_separate(dynamo):
+    assert usage.take_window("mcp-user", "u1", 1, now=NOW, client=dynamo) == 1
+    assert usage.take_window("mcp-user", "u2", 1, now=NOW, client=dynamo) == 1
+    assert usage.take_window("mcp-rerank", "u1", 1, now=NOW, client=dynamo) == 1
+    assert usage.take_window("mcp-user", "u1", 1, now=NOW, client=dynamo) is None
+
+
+def test_the_window_update_sent_to_dynamodb(dynamo):
+    usage.take_window("mcp-rerank", "all", 3, window_s=60, now=NOW, client=dynamo)
+    call = dynamo.calls[-1]
+    assert call["TableName"] == "datasheet-rag-usage"
+    assert call["Key"] == {"pk": {"S": "mcp-rerank#all#30000000"}}
+    assert call["ConditionExpression"] == "attribute_not_exists(n) OR n < :limit"
+    assert call["ExpressionAttributeValues"][":limit"] == {"N": "3"}
+    # The item expires USAGE_WINDOW_KEEP_S after its window ends, for DynamoDB's TTL.
+    assert call["ExpressionAttributeValues"][":expires"] == {"N": str(1_800_000_060 + config.USAGE_WINDOW_KEEP_S)}
+
+
+def test_take_window_raises_other_dynamodb_errors(monkeypatch):
+    monkeypatch.setattr(config, "USAGE_TABLE", "datasheet-rag-usage")
+
+    class Refusing:
+        def update_item(self, **kwargs):
+            raise ClientError({"Error": {"Code": "ProvisionedThroughputExceededException"}}, "UpdateItem")
+
+    with pytest.raises(ClientError):
+        usage.take_window("mcp-user", "u1", 3, now=NOW, client=Refusing())
+
+
+def test_take_window_refuses_a_window_of_zero(dynamo):
+    with pytest.raises(ValueError):
+        usage.take_window("mcp-user", "u1", 3, window_s=0, now=NOW, client=dynamo)
+
+
+def test_take_window_without_a_table_is_refused(monkeypatch):
+    monkeypatch.setattr(config, "USAGE_TABLE", "")
+    with pytest.raises(RuntimeError, match="USAGE_TABLE"):
+        usage.take_window("mcp-user", "u1", 3, now=NOW, client=FakeDynamo())
+
+
+@pytest.mark.parametrize(("now", "left"), [(NOW, 30), (1_800_000_000.0, 60), (1_800_000_059.5, 1),
+                                           (1_800_000_059.9, 1), (1_800_000_000.2, 60)])
+def test_window_left_is_whole_seconds_and_at_least_one(now, left):
+    assert usage.window_left_s(60, now) == left

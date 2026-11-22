@@ -39,7 +39,7 @@ class Fakes:
     def connect(self):
         return FakeConnection()
 
-    def retrieve(self, conn, query, document=None, k=None):
+    def retrieve(self, conn, query, document=None, k=None, rerank_client=None):
         self.calls.append({"query": query, "document": document, "k": k})
         return {"passages": HITS[:k], "reranked": True}
 
@@ -133,7 +133,7 @@ def test_version_header_not_matching_meta_is_400_header_mismatch(client, fakes):
 
 
 def test_unexpected_error_over_http_gives_only_the_generic_text(fakes):
-    def broken_retrieve(conn, query, document=None, k=None):
+    def broken_retrieve(conn, query, document=None, k=None, rerank_client=None):
         raise KeyError("secret detail")
 
     deps = Deps(connect=fakes.connect, retrieve=broken_retrieve, documents=DOCUMENTS)

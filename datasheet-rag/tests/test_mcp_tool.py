@@ -67,7 +67,7 @@ class Fakes:
             raise self.connect_error
         return FakeConnection(self.with_log)
 
-    def retrieve(self, conn, query, document=None, k=None):
+    def retrieve(self, conn, query, document=None, k=None, rerank_client=None):
         self.calls.append({"conn": conn, "query": query, "document": document, "k": k})
         if self.error is not None:
             raise self.error

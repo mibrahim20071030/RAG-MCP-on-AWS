@@ -266,6 +266,13 @@ API_DAILY_ASK_LIMIT = int(os.environ.get("API_DAILY_ASK_LIMIT") or "0")
 KB_DAILY_ASK_LIMIT = int(os.environ.get("KB_DAILY_ASK_LIMIT") or ("50" if DEPLOYED else "0"))
 USAGE_TABLE = os.environ.get("USAGE_TABLE", "")
 USAGE_KEEP_DAYS = 7  # a day's counter item carries an expiry this many days later, for DynamoDB's TTL
+USAGE_WINDOW_KEEP_S = 300  # a window counter item (Project 3) expires this long after its window ends
+# Project 3 MCP server limits (Layer 6), counted in USAGE_TABLE. 0 is off (the local default); the Lambda sets
+# 3 / 100 / 3 (Layer 7). Per user per minute; searches per UTC day for all users; paid reranks per minute shared by
+# all users (the account allows 3 Cohere rerank calls a minute).
+MCP_USER_PER_MINUTE = int(os.environ.get("MCP_USER_PER_MINUTE") or "0")
+MCP_DAILY_LIMIT = int(os.environ.get("MCP_DAILY_LIMIT") or "0")
+MCP_RERANK_PER_MINUTE = int(os.environ.get("MCP_RERANK_PER_MINUTE") or "0")
 # The off switch of the deployed demo (step 7b): DEMO_ENABLED=false in the Lambda answers 503 before anything else.
 DEMO_ENABLED = os.environ.get("DEMO_ENABLED", "true").strip().lower() != "false"
 
