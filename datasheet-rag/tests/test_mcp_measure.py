@@ -21,7 +21,7 @@ def test_the_fixed_list_has_20_questions_covering_every_datasheet_and_type():
     assert [q["id"] for q in questions] == mcp_measure.FIXED_IDS
     assert len(questions) == 20 and len(set(mcp_measure.FIXED_IDS)) == 20
     documents = {doc for q in questions for doc, _ in q["sources"]}
-    assert documents == set(mcp_measure.config.DOCUMENTS)
+    assert documents == set(mcp_measure.config.DATASHEET_DOCUMENTS)
     assert {q["type"] for q in questions} == {"single_value", "table_lookup", "rephrased", "comparison", "no_answer"}
 
 

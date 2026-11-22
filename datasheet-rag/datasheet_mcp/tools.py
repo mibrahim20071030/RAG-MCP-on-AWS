@@ -39,22 +39,30 @@ MODELS_SLOW = "The search models did not answer in time. Wait a minute and searc
 SETUP_FAULTS = ("authentication failed", "certificate", "could not translate host name", "failed to resolve host",
                 "no pg_hba.conf entry")
 
-# Tool-facing datasheet name (the part) -> document name in the database (a key of rag.config.DOCUMENTS).
+# Tool-facing document name (the part, or the AWS guide's short title) -> document name in the database (a key of rag.config.DOCUMENTS).
 DATASHEETS = {doc["part"]: name for name, doc in config.DOCUMENTS.items()}
 # Written out because the input schema needs the names when the module loads; checked against DATASHEETS below.
-DatasheetName = Literal["all", "STM32F205/207", "TCTH0xxxE", "ESP32", "LM35"]
+DatasheetName = Literal[
+    "all", "STM32F205/207", "TCTH0xxxE", "ESP32", "LM35",
+    "AWS Agentic AI Foundations", "AWS Agentic AI Frameworks", "AWS Agentic AI Multi-tenant", "AWS Agentic AI Patterns",
+    "AWS Agentic AI Serverless", "AWS Vector Databases for RAG", "AWS RAG for Healthcare",
+    "AWS RAG Writing Best Practices",
+]
 if set(get_args(DatasheetName)) != {"all", *DATASHEETS}:
     # Out of step, the SDK would accept a name run_search cannot map (a KeyError, so only the generic error).
     raise RuntimeError(f"DatasheetName {get_args(DatasheetName)} does not match the parts in config.DOCUMENTS")
 
 SEARCH_DESCRIPTION = (
-    "Search the datasheets of four electronic parts and return the passages that best match a question: "
-    "STM32F205/207 (ST microcontroller), TCTH0xxxE (Toshiba Thermoflagger over-temperature detection IC), ESP32 (Espressif "
-    "Wi-Fi and Bluetooth chip) and LM35 (TI temperature sensor). Use it for questions about these parts' "
-    "ratings, pinouts, electrical characteristics, timing, features or packages.\n\n"
-    "Answer only from the returned passages. Cite each fact with the datasheet name and the PDF page "
-    "(`page`; `printed_page` is the number printed on the sheet, when it differs). If no passage answers the "
-    "question, say that the datasheets searched do not contain it; do not fill the gap from memory. "
+    "Search a document library and return the passages that best match a question. It holds the datasheets of "
+    "four electronic parts: STM32F205/207 (ST microcontroller), TCTH0xxxE (Toshiba Thermoflagger over-temperature "
+    "detection IC), ESP32 (Espressif Wi-Fi and Bluetooth chip) and LM35 (TI temperature sensor). Use it for "
+    "questions about these parts' ratings, pinouts, electrical characteristics, timing, features or packages. "
+    "It also holds eight AWS Prescriptive Guidance guides: agentic AI foundations, frameworks (and protocols such "
+    "as MCP), multi-tenant and serverless architectures, and patterns and workflows; choosing a vector database "
+    "for RAG; RAG for healthcare; and writing best practices for RAG. Use it for questions on those topics.\n\n"
+    "Answer only from the returned passages. Cite each fact with the document name (`datasheet`) and the PDF page "
+    "(`page`; `printed_page` is the number printed on the page, when it differs). If no passage answers the "
+    "question, say that the documents searched do not contain it; do not fill the gap from memory. "
     "Passages are best first. When `reranked` is true, `relevance` is the reranker's score from 0 to 1; "
     "otherwise it is the search score, which is small (about 0.01 to 0.03) and only orders the passages."
 )
@@ -62,12 +70,12 @@ SEARCH_DESCRIPTION = (
 
 class Passage(BaseModel):
     rank: int = Field(description="Position in the result, 1 is the best match")
-    datasheet: str = Field(description="The part the datasheet covers, for example LM35")
-    revision: str = Field(description="The datasheet revision searched")
+    datasheet: str = Field(description="The document: the part a datasheet covers (for example LM35) or an AWS guide")
+    revision: str = Field(description="The document revision or date searched; empty when it has none")
     page: int | None = Field(description="Page number in the PDF file, counted from 1")
-    printed_page: str | None = Field(description="Page number printed on the sheet, when it differs from page")
+    printed_page: str | None = Field(description="Page number printed on the page, when it differs from page")
     section: str | None = Field(description="Heading of the section the passage is in, when known")
-    text: str = Field(description="The passage text from the datasheet")
+    text: str = Field(description="The passage text from the document")
     relevance: float = Field(description="Relevance score, higher is better (reranker score 0 to 1 when reranked)")
 
 
