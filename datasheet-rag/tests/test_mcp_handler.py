@@ -231,6 +231,101 @@ def test_a_base64_body_logs_its_method():
     assert mcp_handler.request_summary(event(body=call_body(), base64_body=True))["rpc_method"] == "tools/call"
 
 
+def test_an_initialize_logs_the_protocol_version_and_client():
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                       "clientInfo": {"name": "claude-ai", "version": "0.1.0"}}}
+    summary = mcp_handler.request_summary(event(body=body))
+    assert summary["init_protocol_version"] == "2025-11-25"
+    assert summary["client_name"] == "claude-ai" and summary["client_version"] == "0.1.0"
+
+
+def test_initialize_fields_are_cut_and_odd_values_dropped():
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "v" * 500, "clientInfo": {"name": 7, "version": ""}}}
+    summary = mcp_handler.request_summary(event(body=body))
+    assert summary["init_protocol_version"] == "v" * mcp_handler.LOG_TEXT_MAX
+    assert summary["client_name"] is None and summary["client_version"] is None
+
+
+@pytest.mark.parametrize("params", [None, "text", {"clientInfo": "text"}])
+def test_an_initialize_with_odd_params_still_logs(params):
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params}
+    summary = mcp_handler.request_summary(event(body=body))
+    assert summary["rpc_method"] == "initialize"
+    assert summary["init_protocol_version"] is None and summary["client_name"] is None
+
+
+def test_the_printed_line_carries_the_initialize_fields(setup, capsys):
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "clientInfo": {"name": "claude-ai", "version": "0.1.0"}}}
+    for base64_body in (False, True):
+        lambda_handler(event(body=body, base64_body=base64_body), None, setup=setup)
+        line = last_log_line(capsys)
+        assert line["init_protocol_version"] == "2025-06-18"
+        assert line["client_name"] == "claude-ai" and line["client_version"] == "0.1.0"
+
+
+def test_only_the_three_initialize_fields_are_added():
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25", "capabilities": {"q": "query text"},
+                       "clientInfo": {"name": "a", "version": "1", "secret": "hidden-value"},
+                       "access_token": "token-like-value"}}
+    summary = mcp_handler.request_summary(event(body=body))
+    base = set(mcp_handler.request_summary(event(body=call_body())))
+    assert set(summary) == base | {"init_protocol_version", "client_name", "client_version"}
+    text = json.dumps(summary)
+    assert "hidden-value" not in text and "query text" not in text and "token-like-value" not in text
+
+
+class Context:
+    aws_request_id = "req-123"
+
+
+def log_lines(capsys):
+    return [json.loads(line) for line in capsys.readouterr().out.strip().splitlines() if line.startswith("{")]
+
+
+def test_a_start_line_comes_before_the_app_runs(setup, key, capsys, monkeypatch):
+    # A call the Lambda timeout kills never reaches the end line; the start line is already out.
+    seen = []
+
+    def hanging_app(app, lifespan):
+        def run(event, context):
+            seen.extend(log_lines(capsys))
+            raise TimeoutError("stands in for the Lambda timeout")
+        return run
+
+    monkeypatch.setattr(mcp_handler, "Mangum", hanging_app)
+    headers = {**bearer(token_for(key)), "accept": "application/json, text/event-stream"}
+    with pytest.raises(TimeoutError):
+        lambda_handler(event(headers=headers, body=call_body()), Context(), setup=setup)
+    assert len(seen) == 1 and seen[0]["phase"] == "start" and seen[0]["request_id"] == "req-123"
+    assert seen[0]["rpc_method"] == "tools/call" and seen[0]["accept"] == "application/json, text/event-stream"
+    assert "status" not in seen[0]
+    end = log_lines(capsys)[-1]
+    assert end["phase"] == "end" and end["request_id"] == "req-123" and end["status"] is None
+
+
+def test_a_call_prints_a_start_and_an_end_line_without_the_token(setup, key, capsys):
+    token = token_for(key)
+    lambda_handler(event(headers=bearer(token), body=call_body()), Context(), setup=setup)
+    output = capsys.readouterr().out
+    assert token not in output and "max supply voltage" not in output
+    lines = [json.loads(line) for line in output.strip().splitlines() if line.startswith('{"phase"')]
+    assert [line["phase"] for line in lines] == ["start", "end"]
+    assert lines[1]["status"] == 200 and lines[0]["request_id"] == lines[1]["request_id"] == "req-123"
+
+
+def test_no_context_gives_no_request_id(setup, capsys):
+    lambda_handler(event(body=call_body()), None, setup=setup)
+    assert last_log_line(capsys)["request_id"] is None
+
+
+def test_a_tool_call_has_no_initialize_fields():
+    assert "client_name" not in mcp_handler.request_summary(event(body=call_body()))
+
+
 def test_a_deeply_nested_body_keeps_the_real_response_and_the_log_line(setup, capsys):
     response = lambda_handler({**event(), "body": "[" * 100_000}, None, setup=setup)
     assert response["statusCode"] == 401  # the login check answers first; the log step must not replace it
