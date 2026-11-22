@@ -17,7 +17,9 @@ from starlette.testclient import TestClient
 from datasheet_mcp import auth
 from datasheet_mcp.app import build_app, login_from_env
 from datasheet_mcp.auth import CognitoVerifier
+from datasheet_mcp.limits import Limits
 from datasheet_mcp.tools import Deps
+from rag import usage
 
 ISSUER = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_TEST"
 CLIENT = "test-client"
@@ -243,7 +245,7 @@ class Fakes:
     def connect(self):
         return FakeConnection()
 
-    def retrieve(self, conn, query, document=None, k=None):
+    def retrieve(self, conn, query, document=None, k=None, rerank_client=None):
         token = get_access_token()
         self.calls.append({"query": query, "subject": token.subject if token else None})
         return {"passages": HITS[:k], "reranked": True}
@@ -304,6 +306,29 @@ def test_token_subject_is_visible_inside_the_tool_call(client, fakes, make_token
     response = client.post("/mcp", headers=bearer(make_token(sub="someone-else")), json=call_body(ARGS))
     assert response.status_code == 200
     assert [call["subject"] for call in fakes.calls] == ["someone-else"]
+
+
+def test_each_token_subject_gets_its_own_per_user_limit(fakes, verifier, make_token):
+    """Layer 6: the per-user count is keyed by the token's `sub`, read inside the tool's worker thread."""
+    windows = {}
+
+    class Counter:  # rag.usage's take_window, in memory
+        window_left_s = staticmethod(usage.window_left_s)
+
+        @staticmethod
+        def take_window(kind, key, limit, window_s=60, now=None):
+            windows[key] = windows.get(key, 0) + 1
+            return windows[key] if windows[key] <= limit else None
+
+    deps = Deps(connect=fakes.connect, retrieve=fakes.retrieve, documents=DOCUMENTS,
+                limits=Limits(per_user_per_minute=1, counter=Counter, clock=lambda: 1_800_000_000.0))
+    app = build_app(deps, verifier=verifier, public_url=URL, issuer=ISSUER, scope=SCOPE)
+    with TestClient(app, base_url=BASE) as client:
+        results = [client.post("/mcp", headers=bearer(make_token(sub=sub)), json=call_body(ARGS)).json()["result"]
+                   for sub in ("user-a", "user-b", "user-a")]
+    assert [result.get("isError", False) for result in results] == [False, False, True]
+    assert "Too many searches this minute" in results[2]["content"][0]["text"]
+    assert set(windows) == {"user-a", "user-b"}
 
 
 HTTP_BAD_CLAIMS = {name: BAD_CLAIMS[name] for name in

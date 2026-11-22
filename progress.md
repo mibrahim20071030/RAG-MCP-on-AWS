@@ -27,7 +27,9 @@ Project 3 (remote MCP server), Layer 0:
 - [x] 2026-11-21: Layer 5 Cognito console work done (plus resource server `mcp-local` for the binding test); real login passed.
 - [ ] Read `walkthroughs/Project3/Layer5_Walkthrough.pdf`.
 - [x] 2026-11-21: Layer 5 committed on `project-3-layer-5`, PR #30 merged (`8eb7498`).
-- [ ] Before Layer 6: decide the open items in `CLAUDE.md`, "Open decisions for Ibrahim".
+- [x] 2026-11-21: Layer 6 decisions: fixed windows; 3 per user a minute / 100 a day / 3 reranks a minute; daily place given back when nothing was paid; rerank slot 1 per 20 s (after the review).
+- [ ] Read `walkthroughs/Project3/Layer6_Walkthrough.pdf`.
+- [ ] Layer 6: make the branch (for example `git switch -c project-3-layer-6`; the uncommitted work moves with it), commit, push, PR, CI green, merge.
 
 Project 2 (Cycle 2):
 
@@ -218,6 +220,16 @@ Cycle 2 (deploy, UI, report):
   2026-11-10), `/api/ask` throttle rate 0.5, burst 10 (set by the human; the dev user cannot read API Gateway).
 - [ ] 10c. After the LinkedIn traffic: put both caps back to 50 and the `/api/ask` throttle back to rate 0.05, burst 3.
 - [ ] 11. Teardown checklist (including the Knowledge Base and feedback-loop resources), then confirm in Billing that spend has stopped. Wait until the LinkedIn traffic is over.
+
+## 2026-11-21 — Session 37: Project 3 Layer 6 (limits)
+
+- Plan approved (single agent). Decisions by the human: fixed window (not spacing); 3 searches per user a minute, 100 a day for all users, 3 paid reranks a minute shared; the daily place goes back when nothing was paid for.
+- `rag/usage.py`: NEW `take_window` (fixed window item `kind#key#window`, same conditional update as `take`, now shared in `_count_one`) and `window_left_s`. `rag/config.py`: `USAGE_WINDOW_KEEP_S`, `MCP_USER_PER_MINUTE`, `MCP_DAILY_LIMIT`, `MCP_RERANK_PER_MINUTE` (0 = off locally).
+- NEW `datasheet_mcp/limits.py` (`Limits`, `SlotRerankClient`, `NotPaid`, `current_user`, `is_throttle`); `tools.run_search` runs blank check, per-user, daily, connect, retrieve with the slot client; throttle becomes a readable ToolError; release rule. `server.py`: `real_limits()`, user id from the token. `rag/rerank.py` and `rag/retrieve.py` unchanged (the slot wraps the rerank client).
+- Tests: NEW `tests/test_mcp_limits.py` (64), window tests in `tests/test_usage.py`, a two-token HTTP test in `tests/test_mcp_auth.py`; fake `retrieve` signatures in three Project 3 test files take `rerank_client`. Checks: secrets ok, ruff ok, 1,607 passed.
+- Review: built-in `/code-review`, `silent-failure-hunter`, `pr-test-analyzer`. Fixed: a broken rerank counter now gives the daily place back; `real_limits()` refuses to start deployed with a limit missing, or with a limit and no `USAGE_TABLE`; refusals logged at INFO and throttles at WARNING; key and day in counter logs; user id read only when limits are on; `.env.example` block moved; tests through the real `rag.rerank` and `rag.usage`. Problem found: a fixed 1-minute rerank window lets 6 calls out within seconds around a minute boundary (Bedrock allows 3 a minute). The human chose 1 rerank per 20 s window. Kept and recorded: see the `CLAUDE.md` Differences log. Review recorded (1 of 2).
+- Not run: the optional by-hand check against the real DynamoDB table.
+- `CLAUDE.md` updated: Differences log (6 Layer 6 entries), Status log with the Layer 7 settings, Open decisions (window and numbers settled). Walkthrough written: `walkthroughs/Project3/Layer6_Walkthrough.pdf` (Terms first, headless Edge). Layer 6 ready for the human's branch, commit and PR.
 
 ## 2026-11-21 — Session 36: Project 3 Layer 5 (login), build part
 

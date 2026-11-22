@@ -3,14 +3,19 @@
 The tool returns passages only; Claude writes the answer from them. Reviewer notes (corrections) are not
 included: they are Project 2's way of fixing its own answers, and they never enter `retrieve_passages`.
 """
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, get_args
 
+from botocore.exceptions import ClientError
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from rag import config
+from datasheet_mcp.limits import LOCAL_USER, THROTTLED, Limits, NotPaid, is_throttle
+from rag import config, rerank
+
+log = logging.getLogger(__name__)
 
 # Tool-facing datasheet name (the part) -> document name in the database (a key of rag.config.DOCUMENTS).
 DATASHEETS = {doc["part"]: name for name, doc in config.DOCUMENTS.items()}
@@ -56,11 +61,15 @@ class Deps:
     """What the tool calls, passed in so tests can give fakes.
 
     `connect()` opens a database connection usable in a `with` block (closed at the end). `retrieve` has the
-    signature of `rag.retrieve.retrieve_passages`. `documents` is shaped like `rag.config.DOCUMENTS`.
+    signature of `rag.retrieve.retrieve_passages`. `documents` is shaped like `rag.config.DOCUMENTS`. `limits`
+    (Layer 6) are the usage limits, None for none. `rerank_client` makes the real Bedrock client a rerank slot
+    wraps (rag.rerank's own, by default).
     """
     connect: Callable
     retrieve: Callable
     documents: dict
+    limits: Limits | None = None
+    rerank_client: Callable = rerank._bedrock
 
 
 def shape(result: dict, query: str, documents: dict) -> SearchResult:
@@ -82,16 +91,42 @@ def shape(result: dict, query: str, documents: dict) -> SearchResult:
     return SearchResult(query=query, count=len(passages), reranked=result["reranked"], passages=passages)
 
 
-def run_search(query: str, datasheet: str, num_results: int, deps: Deps) -> SearchResult:
+def run_search(query: str, datasheet: str, num_results: int, deps: Deps, user: str = LOCAL_USER) -> SearchResult:
     """Search one datasheet (or all) for the query and return up to num_results passages.
 
-    The SDK has already checked the input limits. One database connection is opened for the call and closed
-    when it ends, so an idle Aurora can pause.
+    The SDK has already checked the token and the input limits. Then, cheapest first: the blank-query check, the
+    user's per-minute count, the daily cap, the database. One database connection is opened for the call and
+    closed when it ends, so an idle Aurora can pause.
+
+    The daily place goes back when nothing was paid for: the database could not be reached, the rerank slot was
+    refused, or Bedrock throttled the call. A throttle becomes a readable ToolError; other errors pass on.
     """
     query = query.strip()
     if not query:
         raise ToolError("The query is empty. Send the question or the key words to look for.")
     document = None if datasheet == "all" else DATASHEETS[datasheet]
-    with deps.connect() as conn:
-        result = deps.retrieve(conn, query, document=document, k=num_results)
+    limits = deps.limits
+    day = None
+    if limits is not None:
+        limits.check_user(user)
+        day = limits.take_daily()
+    rerank_client = limits.rerank_client(deps.rerank_client) if limits is not None else None
+    give_back = True  # until the database answers
+    try:
+        with deps.connect() as conn:
+            give_back = False
+            result = deps.retrieve(conn, query, document=document, k=num_results, rerank_client=rerank_client)
+    except NotPaid:
+        give_back = True
+        raise
+    except ClientError as error:
+        if not is_throttle(error):
+            raise
+        give_back = True
+        log.warning("Bedrock throttled the call (%s, request %s)", error.response.get("Error", {}).get("Code"),
+                    error.response.get("ResponseMetadata", {}).get("RequestId"))
+        raise ToolError(THROTTLED) from error
+    finally:
+        if give_back and limits is not None:
+            limits.release_daily(day)
     return shape(result, query, deps.documents)
